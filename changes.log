@@ -1,419 +1,412 @@
-diff --git a/GPTRefactor.py b/GPTRefactor.py
-deleted file mode 100644
-index 021a60f..0000000
---- a/GPTRefactor.py
-+++ /dev/null
-@@ -1,362 +0,0 @@
--#!/usr/bin/env python3
--import os
--import re
--import json
--import subprocess
--from collections import defaultdict
--
--import pefile
--from PackedAnalyzer import analyze_pe
--
--# ---------- Import analysis ----------
--
--def summarize_imports(path):
--    """
--    Return a dict: {dll_name: [func1, func2, ...]}.
--    If no import table, returns {}.
--    """
--    try:
--        pe = pefile.PE(path, fast_load=True)
--        pe.parse_data_directories(
--            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]]
--        )
--    except Exception:
--        return {}
--
--    imports = defaultdict(list)
--
--    if not hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
--        return {}
--
--    for entry in pe.DIRECTORY_ENTRY_IMPORT:
--        dll = entry.dll.decode(errors="ignore") if entry.dll else "UNKNOWN"
--        for imp in entry.imports:
--            if imp.name:
--                name = imp.name.decode(errors="ignore")
--                imports[dll].append(name)
--
--    summary = {
--        dll: sorted(funcs)
--        for dll, funcs in sorted(imports.items())
--    }
--    return summary
--
--
--def summarize_capabilities(imports_dict):
--    """
--    Small heuristic summary of what the binary *could* do based on imports.
--    imports_dict: {dll: [funcs]}
--    """
--    dlls_lower = {dll.lower() for dll in imports_dict.keys()}
--    funcs_lower = {fn.lower() for funcs in imports_dict.values() for fn in funcs}
--
--    uses_registry = (
--        "advapi32.dll" in dlls_lower and
--        any(fn.startswith("reg") for fn in funcs_lower)
--    )
--
--    uses_network = any(
--        d in dlls_lower
--        for d in ("ws2_32.dll", "wininet.dll", "winhttp.dll", "iphlpapi.dll")
--    )
--
--    uses_crypto = any(
--        d in dlls_lower
--        for d in ("crypt32.dll", "bcrypt.dll", "ncrypt.dll", "rsaenh.dll")
--    )
--
--    process_injection = any(
--        fn in funcs_lower
--        for fn in (
--            "writeprocessmemory",
--            "createremotethread",
--            "virtualallocex",
--            "openprocess",
--            "setthreadcontext",
--            "queueuserapc",
--        )
--    )
--
--    service_persistence = any(
--        fn in funcs_lower
--        for fn in (
--            "createservicea",
--            "createservicew",
--            "changeserviceconfiga",
--            "changeserviceconfigw",
--            "startservicea",
--            "startservicew",
--        )
--    )
--
--    interesting_api_tokens = {
--        "virtualalloc", "virtualallocex", "virtualprotect",
--        "loadlibrarya", "loadlibraryw", "getprocaddress",
--        "writeprocessmemory", "createremotethread",
--        "mapviewoffile", "unmapviewoffile",
--        "internetopen", "internetconnect", "httpsendrequest",
--        "connect", "send", "recv",
--    }
--
--    interesting_apis = sorted(
--        {fn for fn in funcs_lower for token in interesting_api_tokens if token in fn}
--    )
--
--    return {
--        "uses_registry": uses_registry,
--        "uses_network": uses_network,
--        "uses_crypto": uses_crypto,
--        "can_inject_into_other_processes": process_injection,
--        "can_persist_via_services": service_persistence,
--        "interesting_apis": interesting_apis,
--    }
--
--
--# ---------- Strings analysis ----------
--
--def _extract_ascii_strings(path, min_len=4, max_strings=5000):
--    strings = []
--    current = []
--
--    with open(path, "rb") as f:
--        data = f.read()
--
--    for b in data:
--        if 32 <= b <= 126:
--            current.append(chr(b))
--        else:
--            if len(current) >= min_len:
--                strings.append("".join(current))
--                if len(strings) >= max_strings:
--                    break
--            current = []
--    if len(current) >= min_len and len(strings) < max_strings:
--        strings.append("".join(current))
--
--    return strings
--
--
--def summarize_strings(path, max_sample_strings=20):
--    strings = _extract_ascii_strings(path)
--
--    domain_re = re.compile(
--        r"\b[a-zA-Z0-9.-]+\.(com|net|org|info|io|co|ru|cn|de|uk|gov|edu|biz|xyz|top|club|jp|br|pl|fr|it|au|es|nl|se|no)\b"
--    )
--    ip_re = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
--
--    suspicious_proc_names = [
--        "svchost.exe", "lsass.exe", "services.exe", "winlogon.exe",
--        "explorer.exe", "rundll32.exe", "smss.exe", "csrss.exe", "taskmgr.exe",
--    ]
--
--    keyword_terms = [
--        "keylog", "inject", "shell", "backdoor", "rat ",
--        "miner", "steal", "password", "credential",
--        "hook", "persist", "autorun", "runonce", "startup",
--        "update server", "botnet",
--    ]
--
--    domains = set()
--    ips = set()
--    suspicious_procs = set()
--    keywords = set()
--
--    for s in strings:
--        for m in domain_re.finditer(s):
--            domains.add(m.group(0).lower())
--
--        for m in ip_re.finditer(s):
--            ip = m.group(0)
--            octets = ip.split(".")
--            try:
--                if all(0 <= int(o) <= 255 for o in octets):
--                    ips.add(ip)
--            except ValueError:
--                pass
--
--        lower_s = s.lower()
--
--        for p in suspicious_proc_names:
--            if p in lower_s:
--                suspicious_procs.add(p)
--
--        for kw in keyword_terms:
--            if kw in lower_s:
--                keywords.add(kw.strip())
--
--    sample_strings = strings[:max_sample_strings]
--
--    return {
--        "num_strings": len(strings),
--        "sample_strings": sample_strings,
--        "domains": sorted(domains),
--        "ips": sorted(ips),
--        "suspicious_process_names": sorted(suspicious_procs),
--        "keywords": sorted(keywords),
--    }
--
--
--# ---------- Code summary (Capstone) ----------
--
--def summarize_code(path, max_instructions=64):
--    """
--    Use Capstone (if available) to take a small window of instructions at EP
--    and summarise basic instruction mix.
--    """
--    try:
--        import capstone
--    except ImportError:
--        return {"note": "capstone not installed; code summary unavailable"}
--
--    try:
--        pe = pefile.PE(path, fast_load=False)
--    except Exception as e:
--        return {"error": f"failed_to_parse_pe: {e!s}"}
--
--    try:
--        is_64 = pe.FILE_HEADER.Machine == pefile.MACHINE_TYPE["IMAGE_FILE_MACHINE_AMD64"]
--    except Exception:
--        is_64 = False
--
--    arch = capstone.CS_ARCH_X86
--    mode = capstone.CS_MODE_64 if is_64 else capstone.CS_MODE_32
--
--    ep_rva = pe.OPTIONAL_HEADER.AddressOfEntryPoint
--    ep_offset = pe.get_offset_from_rva(ep_rva)
--
--    # Small window of bytes at EP
--    data = pe.__data__[ep_offset:ep_offset + max_instructions * 16]
--
--    md = capstone.Cs(arch, mode)
--    md.detail = False
--
--    total = 0
--    call_count = 0
--    jump_count = 0
--    push_count = 0
--    xor_count = 0
--    mnemonic_counts = defaultdict(int)
--
--    for insn in md.disasm(data, pe.OPTIONAL_HEADER.ImageBase + ep_rva):
--        total += 1
--        m = insn.mnemonic.lower()
--        mnemonic_counts[m] += 1
--
--        if m == "call":
--            call_count += 1
--        elif m.startswith("j"):  # jmp, jz, jne, etc.
--            jump_count += 1
--        elif m == "push":
--            push_count += 1
--        elif m == "xor":
--            xor_count += 1
--
--        if total >= max_instructions:
--            break
--
--    top_mnemonics = sorted(
--        mnemonic_counts.items(), key=lambda kv: kv[1], reverse=True
--    )[:10]
--
--    return {
--        "ep_offset": ep_offset,
--        "instructions_analyzed": total,
--        "num_calls": call_count,
--        "num_jumps": jump_count,
--        "num_push": push_count,
--        "num_xor": xor_count,
--        "top_mnemonics": top_mnemonics,
--    }
--
--
--# ---------- Utility helpers ----------
--
--def changeDir(newTargetDir):
--    os.chdir(newTargetDir)
--    fworking_directory = os.getcwd()
--    print(f"[+] Working Directory is: {fworking_directory}")
--    return None
--
--
--def clearOldLogs(file_to_delete):
--    if os.path.exists(file_to_delete):
--        try:
--            os.remove(file_to_delete)
--            print(f"[+] Removed old log file: {file_to_delete}")
--        except OSError:
--            pass
--
--
--def getFilesToScan():
--    # Read complete Loki log file
--    with open("lokiOut.txt", "r", encoding="utf-8", errors="ignore") as handle:
--        log_text = handle.read()
--
--    pattern = re.compile(r"FILE:\s*(.*?)\s+SCORE:")
--    filepaths = pattern.findall(log_text)
--    return filepaths
--
--
--def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"):
--    lokiDir = os.path.join(sWorkingDir, "Loki")
--    print(lokiDir)
--    os.chdir(lokiDir)
--    # Run Loki on Sample Folder, save Output as lokiOut.txt
--    subprocess.run(
--        ["loki.exe", "-p", sdirectoryToScan, "-l", "lokiOut.txt"],
--        shell=True,
--        check=False,
--    )
--    # Move Output one folder up because that is where this file is running
--    subprocess.run("powershell cp lokiOut.txt ..", shell=True, check=False)
--    os.chdir(sWorkingDir)
--    print(f"[+] Ran Loki on directory {sdirectoryToScan}")
--    return None
--
--
--# ---------- Main ----------
--
--if __name__ == "__main__":
--    directoryToScan = r"C:\Users\Adam\Desktop\Dev\sample"   # Folder to scan
--    logDir = "summary.json"                                 # Output file
--
--    workingDirectory = os.path.dirname(os.path.abspath(__file__))
--    changeDir(workingDirectory)
--    clearOldLogs(logDir)
--
--    # 1) Run Loki and parse the hit list
--    runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory)
--    listofBinaries = getFilesToScan()
--
--    samples = []
--
--    # 2) For each binary Loki flagged, run analyses
--    for binaryToAnalyze in listofBinaries:
--        clean = os.path.normpath(binaryToAnalyze)
--        print(f"[+] Analyzing {clean}")
--
--        importsResult = summarize_imports(clean)
--        packedResult = analyze_pe(clean)
--        capabilities = summarize_capabilities(importsResult)
--        strings_summary = summarize_strings(clean)
--        code_summary = summarize_code(clean)
--
--        file_path = packedResult.get("file", clean)
--        pe_analysis = {k: v for k, v in packedResult.items() if k != "file"}
--
--        samples.append({
--            "file": file_path,
--            "imports": importsResult,
--            "capabilities": capabilities,
--            "strings_summary": strings_summary,
--            "code_summary": code_summary,
--            "pe_analysis": pe_analysis,
--        })
--
--    # 3) Write single valid JSON document
--    with open(logDir, "w", encoding="utf-8") as f:
--        json.dump({"samples": samples}, f, indent=2)
--
--    print(f"[+] Saved analysis to {logDir}")
--    print("Enter any key to exit")
--    input()
-diff --git a/capstonetest.py b/capstonetest.py
-deleted file mode 100644
-index d2fde75..0000000
---- a/capstonetest.py
-+++ /dev/null
-@@ -1,24 +0,0 @@
--from capstone import *
--from capstone.arm import *
--
--CODE = b"\xf1\x02\x03\x0e\x00\x00\xa0\xe3\x02\x30\xc1\xe7\x00\x00\x53\xe3"
--
--md = Cs(CS_ARCH_ARM, CS_MODE_ARM)
--md.detail = True
--
--for i in md.disasm(CODE, 0x1000):
--    if i.id in (ARM_INS_BL, ARM_INS_CMP):
--        print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
--
--        if len(i.regs_read) > 0:
--            print("\tImplicit registers read: "),
--            for r in i.regs_read:
--                print("%s " %i.reg_name(r)),
--            print
--
--        if len(i.groups) > 0:
--            print("\tThis instruction belongs to groups:"),
--            for g in i.groups:
--                print("%u" %g),
--            print
--input()
-\ No newline at end of file
 diff --git a/changes.log b/changes.log
-index 1905cc7..2a376e5 100644
+index f627991..e69de29 100644
 --- a/changes.log
 +++ b/changes.log
-@@ -1,102 +0,0 @@
--diff --git a/CS1XA3 b/CS1XA3
--deleted file mode 160000
--index 27f0b06..0000000
----- a/CS1XA3
+@@ -1,694 +0,0 @@
+-diff --git a/GPTRefactor.py b/GPTRefactor.py
+-deleted file mode 100644
+-index 021a60f..0000000
+---- a/GPTRefactor.py
 -+++ /dev/null
--@@ -1 +0,0 @@
---Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
+-@@ -1,362 +0,0 @@
+--#!/usr/bin/env python3
+--import os
+--import re
+--import json
+--import subprocess
+--from collections import defaultdict
+--
+--import pefile
+--from PackedAnalyzer import analyze_pe
+--
+--# ---------- Import analysis ----------
+--
+--def summarize_imports(path):
+--    """
+--    Return a dict: {dll_name: [func1, func2, ...]}.
+--    If no import table, returns {}.
+--    """
+--    try:
+--        pe = pefile.PE(path, fast_load=True)
+--        pe.parse_data_directories(
+--            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]]
+--        )
+--    except Exception:
+--        return {}
+--
+--    imports = defaultdict(list)
+--
+--    if not hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+--        return {}
+--
+--    for entry in pe.DIRECTORY_ENTRY_IMPORT:
+--        dll = entry.dll.decode(errors="ignore") if entry.dll else "UNKNOWN"
+--        for imp in entry.imports:
+--            if imp.name:
+--                name = imp.name.decode(errors="ignore")
+--                imports[dll].append(name)
+--
+--    summary = {
+--        dll: sorted(funcs)
+--        for dll, funcs in sorted(imports.items())
+--    }
+--    return summary
+--
+--
+--def summarize_capabilities(imports_dict):
+--    """
+--    Small heuristic summary of what the binary *could* do based on imports.
+--    imports_dict: {dll: [funcs]}
+--    """
+--    dlls_lower = {dll.lower() for dll in imports_dict.keys()}
+--    funcs_lower = {fn.lower() for funcs in imports_dict.values() for fn in funcs}
+--
+--    uses_registry = (
+--        "advapi32.dll" in dlls_lower and
+--        any(fn.startswith("reg") for fn in funcs_lower)
+--    )
+--
+--    uses_network = any(
+--        d in dlls_lower
+--        for d in ("ws2_32.dll", "wininet.dll", "winhttp.dll", "iphlpapi.dll")
+--    )
+--
+--    uses_crypto = any(
+--        d in dlls_lower
+--        for d in ("crypt32.dll", "bcrypt.dll", "ncrypt.dll", "rsaenh.dll")
+--    )
+--
+--    process_injection = any(
+--        fn in funcs_lower
+--        for fn in (
+--            "writeprocessmemory",
+--            "createremotethread",
+--            "virtualallocex",
+--            "openprocess",
+--            "setthreadcontext",
+--            "queueuserapc",
+--        )
+--    )
+--
+--    service_persistence = any(
+--        fn in funcs_lower
+--        for fn in (
+--            "createservicea",
+--            "createservicew",
+--            "changeserviceconfiga",
+--            "changeserviceconfigw",
+--            "startservicea",
+--            "startservicew",
+--        )
+--    )
+--
+--    interesting_api_tokens = {
+--        "virtualalloc", "virtualallocex", "virtualprotect",
+--        "loadlibrarya", "loadlibraryw", "getprocaddress",
+--        "writeprocessmemory", "createremotethread",
+--        "mapviewoffile", "unmapviewoffile",
+--        "internetopen", "internetconnect", "httpsendrequest",
+--        "connect", "send", "recv",
+--    }
+--
+--    interesting_apis = sorted(
+--        {fn for fn in funcs_lower for token in interesting_api_tokens if token in fn}
+--    )
+--
+--    return {
+--        "uses_registry": uses_registry,
+--        "uses_network": uses_network,
+--        "uses_crypto": uses_crypto,
+--        "can_inject_into_other_processes": process_injection,
+--        "can_persist_via_services": service_persistence,
+--        "interesting_apis": interesting_apis,
+--    }
+--
+--
+--# ---------- Strings analysis ----------
+--
+--def _extract_ascii_strings(path, min_len=4, max_strings=5000):
+--    strings = []
+--    current = []
+--
+--    with open(path, "rb") as f:
+--        data = f.read()
+--
+--    for b in data:
+--        if 32 <= b <= 126:
+--            current.append(chr(b))
+--        else:
+--            if len(current) >= min_len:
+--                strings.append("".join(current))
+--                if len(strings) >= max_strings:
+--                    break
+--            current = []
+--    if len(current) >= min_len and len(strings) < max_strings:
+--        strings.append("".join(current))
+--
+--    return strings
+--
+--
+--def summarize_strings(path, max_sample_strings=20):
+--    strings = _extract_ascii_strings(path)
+--
+--    domain_re = re.compile(
+--        r"\b[a-zA-Z0-9.-]+\.(com|net|org|info|io|co|ru|cn|de|uk|gov|edu|biz|xyz|top|club|jp|br|pl|fr|it|au|es|nl|se|no)\b"
+--    )
+--    ip_re = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+--
+--    suspicious_proc_names = [
+--        "svchost.exe", "lsass.exe", "services.exe", "winlogon.exe",
+--        "explorer.exe", "rundll32.exe", "smss.exe", "csrss.exe", "taskmgr.exe",
+--    ]
+--
+--    keyword_terms = [
+--        "keylog", "inject", "shell", "backdoor", "rat ",
+--        "miner", "steal", "password", "credential",
+--        "hook", "persist", "autorun", "runonce", "startup",
+--        "update server", "botnet",
+--    ]
+--
+--    domains = set()
+--    ips = set()
+--    suspicious_procs = set()
+--    keywords = set()
+--
+--    for s in strings:
+--        for m in domain_re.finditer(s):
+--            domains.add(m.group(0).lower())
+--
+--        for m in ip_re.finditer(s):
+--            ip = m.group(0)
+--            octets = ip.split(".")
+--            try:
+--                if all(0 <= int(o) <= 255 for o in octets):
+--                    ips.add(ip)
+--            except ValueError:
+--                pass
+--
+--        lower_s = s.lower()
+--
+--        for p in suspicious_proc_names:
+--            if p in lower_s:
+--                suspicious_procs.add(p)
+--
+--        for kw in keyword_terms:
+--            if kw in lower_s:
+--                keywords.add(kw.strip())
+--
+--    sample_strings = strings[:max_sample_strings]
+--
+--    return {
+--        "num_strings": len(strings),
+--        "sample_strings": sample_strings,
+--        "domains": sorted(domains),
+--        "ips": sorted(ips),
+--        "suspicious_process_names": sorted(suspicious_procs),
+--        "keywords": sorted(keywords),
+--    }
+--
+--
+--# ---------- Code summary (Capstone) ----------
+--
+--def summarize_code(path, max_instructions=64):
+--    """
+--    Use Capstone (if available) to take a small window of instructions at EP
+--    and summarise basic instruction mix.
+--    """
+--    try:
+--        import capstone
+--    except ImportError:
+--        return {"note": "capstone not installed; code summary unavailable"}
+--
+--    try:
+--        pe = pefile.PE(path, fast_load=False)
+--    except Exception as e:
+--        return {"error": f"failed_to_parse_pe: {e!s}"}
+--
+--    try:
+--        is_64 = pe.FILE_HEADER.Machine == pefile.MACHINE_TYPE["IMAGE_FILE_MACHINE_AMD64"]
+--    except Exception:
+--        is_64 = False
+--
+--    arch = capstone.CS_ARCH_X86
+--    mode = capstone.CS_MODE_64 if is_64 else capstone.CS_MODE_32
+--
+--    ep_rva = pe.OPTIONAL_HEADER.AddressOfEntryPoint
+--    ep_offset = pe.get_offset_from_rva(ep_rva)
+--
+--    # Small window of bytes at EP
+--    data = pe.__data__[ep_offset:ep_offset + max_instructions * 16]
+--
+--    md = capstone.Cs(arch, mode)
+--    md.detail = False
+--
+--    total = 0
+--    call_count = 0
+--    jump_count = 0
+--    push_count = 0
+--    xor_count = 0
+--    mnemonic_counts = defaultdict(int)
+--
+--    for insn in md.disasm(data, pe.OPTIONAL_HEADER.ImageBase + ep_rva):
+--        total += 1
+--        m = insn.mnemonic.lower()
+--        mnemonic_counts[m] += 1
+--
+--        if m == "call":
+--            call_count += 1
+--        elif m.startswith("j"):  # jmp, jz, jne, etc.
+--            jump_count += 1
+--        elif m == "push":
+--            push_count += 1
+--        elif m == "xor":
+--            xor_count += 1
+--
+--        if total >= max_instructions:
+--            break
+--
+--    top_mnemonics = sorted(
+--        mnemonic_counts.items(), key=lambda kv: kv[1], reverse=True
+--    )[:10]
+--
+--    return {
+--        "ep_offset": ep_offset,
+--        "instructions_analyzed": total,
+--        "num_calls": call_count,
+--        "num_jumps": jump_count,
+--        "num_push": push_count,
+--        "num_xor": xor_count,
+--        "top_mnemonics": top_mnemonics,
+--    }
+--
+--
+--# ---------- Utility helpers ----------
+--
+--def changeDir(newTargetDir):
+--    os.chdir(newTargetDir)
+--    fworking_directory = os.getcwd()
+--    print(f"[+] Working Directory is: {fworking_directory}")
+--    return None
+--
+--
+--def clearOldLogs(file_to_delete):
+--    if os.path.exists(file_to_delete):
+--        try:
+--            os.remove(file_to_delete)
+--            print(f"[+] Removed old log file: {file_to_delete}")
+--        except OSError:
+--            pass
+--
+--
+--def getFilesToScan():
+--    # Read complete Loki log file
+--    with open("lokiOut.txt", "r", encoding="utf-8", errors="ignore") as handle:
+--        log_text = handle.read()
+--
+--    pattern = re.compile(r"FILE:\s*(.*?)\s+SCORE:")
+--    filepaths = pattern.findall(log_text)
+--    return filepaths
+--
+--
+--def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"):
+--    lokiDir = os.path.join(sWorkingDir, "Loki")
+--    print(lokiDir)
+--    os.chdir(lokiDir)
+--    # Run Loki on Sample Folder, save Output as lokiOut.txt
+--    subprocess.run(
+--        ["loki.exe", "-p", sdirectoryToScan, "-l", "lokiOut.txt"],
+--        shell=True,
+--        check=False,
+--    )
+--    # Move Output one folder up because that is where this file is running
+--    subprocess.run("powershell cp lokiOut.txt ..", shell=True, check=False)
+--    os.chdir(sWorkingDir)
+--    print(f"[+] Ran Loki on directory {sdirectoryToScan}")
+--    return None
+--
+--
+--# ---------- Main ----------
+--
+--if __name__ == "__main__":
+--    directoryToScan = r"C:\Users\Adam\Desktop\Dev\sample"   # Folder to scan
+--    logDir = "summary.json"                                 # Output file
+--
+--    workingDirectory = os.path.dirname(os.path.abspath(__file__))
+--    changeDir(workingDirectory)
+--    clearOldLogs(logDir)
+--
+--    # 1) Run Loki and parse the hit list
+--    runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory)
+--    listofBinaries = getFilesToScan()
+--
+--    samples = []
+--
+--    # 2) For each binary Loki flagged, run analyses
+--    for binaryToAnalyze in listofBinaries:
+--        clean = os.path.normpath(binaryToAnalyze)
+--        print(f"[+] Analyzing {clean}")
+--
+--        importsResult = summarize_imports(clean)
+--        packedResult = analyze_pe(clean)
+--        capabilities = summarize_capabilities(importsResult)
+--        strings_summary = summarize_strings(clean)
+--        code_summary = summarize_code(clean)
+--
+--        file_path = packedResult.get("file", clean)
+--        pe_analysis = {k: v for k, v in packedResult.items() if k != "file"}
+--
+--        samples.append({
+--            "file": file_path,
+--            "imports": importsResult,
+--            "capabilities": capabilities,
+--            "strings_summary": strings_summary,
+--            "code_summary": code_summary,
+--            "pe_analysis": pe_analysis,
+--        })
+--
+--    # 3) Write single valid JSON document
+--    with open(logDir, "w", encoding="utf-8") as f:
+--        json.dump({"samples": samples}, f, indent=2)
+--
+--    print(f"[+] Saved analysis to {logDir}")
+--    print("Enter any key to exit")
+--    input()
+-diff --git a/capstonetest.py b/capstonetest.py
+-deleted file mode 100644
+-index d2fde75..0000000
+---- a/capstonetest.py
+-+++ /dev/null
+-@@ -1,24 +0,0 @@
+--from capstone import *
+--from capstone.arm import *
+--
+--CODE = b"\xf1\x02\x03\x0e\x00\x00\xa0\xe3\x02\x30\xc1\xe7\x00\x00\x53\xe3"
+--
+--md = Cs(CS_ARCH_ARM, CS_MODE_ARM)
+--md.detail = True
+--
+--for i in md.disasm(CODE, 0x1000):
+--    if i.id in (ARM_INS_BL, ARM_INS_CMP):
+--        print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
+--
+--        if len(i.regs_read) > 0:
+--            print("\tImplicit registers read: "),
+--            for r in i.regs_read:
+--                print("%s " %i.reg_name(r)),
+--            print
+--
+--        if len(i.groups) > 0:
+--            print("\tThis instruction belongs to groups:"),
+--            for g in i.groups:
+--                print("%u" %g),
+--            print
+--input()
+-\ No newline at end of file
 -diff --git a/changes.log b/changes.log
--index 09dc651..e69de29 100644
+-index 1905cc7..2a376e5 100644
 ---- a/changes.log
 -+++ b/changes.log
--@@ -1,82 +0,0 @@
+-@@ -1,102 +0,0 @@
 --diff --git a/CS1XA3 b/CS1XA3
 --deleted file mode 160000
 --index 27f0b06..0000000
@@ -422,10 +415,10 @@ index 1905cc7..2a376e5 100644
 --@@ -1 +0,0 @@
 ---Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
 --diff --git a/changes.log b/changes.log
---index 5d279a6..e69de29 100644
+--index 09dc651..e69de29 100644
 ----- a/changes.log
 --+++ b/changes.log
---@@ -1,64 +0,0 @@
+--@@ -1,82 +0,0 @@
 ---diff --git a/CS1XA3 b/CS1XA3
 ---deleted file mode 160000
 ---index 27f0b06..0000000
@@ -434,10 +427,10 @@ index 1905cc7..2a376e5 100644
 ---@@ -1 +0,0 @@
 ----Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
 ---diff --git a/changes.log b/changes.log
----index 3c384c3..e69de29 100644
+---index 5d279a6..e69de29 100644
 ------ a/changes.log
 ---+++ b/changes.log
----@@ -1,46 +0,0 @@
+---@@ -1,64 +0,0 @@
 ----diff --git a/CS1XA3 b/CS1XA3
 ----deleted file mode 160000
 ----index 27f0b06..0000000
@@ -446,35 +439,53 @@ index 1905cc7..2a376e5 100644
 ----@@ -1 +0,0 @@
 -----Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
 ----diff --git a/changes.log b/changes.log
-----index 973220e..e69de29 100644
+----index 3c384c3..e69de29 100644
 ------- a/changes.log
 ----+++ b/changes.log
-----@@ -1,28 +0,0 @@
------diff --git a/README.md b/README.md
------index e8352b9..92ca82b 100644
--------- a/README.md
------+++ b/README.md
------@@ -1,2 +1,2 @@
-------# CapstoneProject
-------Work In Progress
------+# CapstoneProject
------+Work In Progress
+----@@ -1,46 +0,0 @@
+-----diff --git a/CS1XA3 b/CS1XA3
+-----deleted file mode 160000
+-----index 27f0b06..0000000
+-------- a/CS1XA3
+-----+++ /dev/null
+-----@@ -1 +0,0 @@
+------Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
+-----diff --git a/changes.log b/changes.log
+-----index 973220e..e69de29 100644
+-------- a/changes.log
+-----+++ b/changes.log
+-----@@ -1,28 +0,0 @@
+------diff --git a/README.md b/README.md
+------index e8352b9..92ca82b 100644
+--------- a/README.md
+------+++ b/README.md
+------@@ -1,2 +1,2 @@
+-------# CapstoneProject
+-------Work In Progress
+------+# CapstoneProject
+------+Work In Progress
+------
+------
+------[0;32mNew and Modified[1;37m
+------README.md
+------CS1XA3/
+------GPTRefactor.py
+------PackedAnalyzer.py
+------ProjectAnalyze.sh
+------Scanner.py
+------capstonetest.py
+------changes.log
+------error.log
+------lokiOut.txt
+------quickUpdate
+------summary.json
+------test.py
+------
+------
+------[0;32mRemoved files:[1;37m
 -----
 -----
 -----[0;32mNew and Modified[1;37m
------README.md
------CS1XA3/
------GPTRefactor.py
------PackedAnalyzer.py
------ProjectAnalyze.sh
------Scanner.py
------capstonetest.py
------changes.log
------error.log
------lokiOut.txt
------quickUpdate
------summary.json
------test.py
 -----
 -----
 -----[0;32mRemoved files:[1;37m
@@ -493,9 +504,185 @@ index 1905cc7..2a376e5 100644
 --
 --
 --[0;32mNew and Modified[1;37m
+--changes.log
 --
 --
 --[0;32mRemoved files:[1;37m
+--CS1XA3
+-diff --git a/error.log b/error.log
+-deleted file mode 100644
+-index e69de29..0000000
+-diff --git a/lokiOut.txt b/lokiOut.txt
+-deleted file mode 100644
+-index f6456dd..0000000
+---- a/lokiOut.txt
+-+++ /dev/null
+-@@ -1,25 +0,0 @@
+--20251210T01:48:50Z ADAM-PC LOKI: Notice: MODULE: Init MESSAGE: Starting Loki Scan VERSION: 0.51.0 SYSTEM: ADAM-PC TIME: 20251210T01:48:50Z PLATFORM: 10 10.0.26200 SP0 Multiprocessor Free PROC: AMD64 Family 23 Model 24 Stepping 1, AuthenticAMD ARCH: 64bit WindowsPE
+--20251210T01:48:50Z ADAM-PC LOKI: Notice: MODULE: PESieve MESSAGE: PE-Sieve successfully initialized BINARY: C:\Users\Adam\Desktop\Dev\Loki\tools\pe-sieve64.exe SOURCE: https://github.com/hasherezade/pe-sieve
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: File Name Characteristics initialized with 3818 regex patterns
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: C2 server indicators initialized with 1773 elements
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Malicious MD5 Hashes initialized with 986 hashes
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Malicious SHA1 Hashes initialized with 893 hashes
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Malicious SHA256 Hashes initialized with 1174 hashes
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: False Positive Hashes initialized with 0 hashes
+--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Processing YARA rules folder C:\Users\Adam\Desktop\Dev\Loki\signature-base\yara
+--20251210T01:48:54Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Initializing all YARA rules at once (composed string of all rule files)
+--20251210T01:48:54Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Initialized 1043 Yara rules
+--20251210T01:48:54Z ADAM-PC LOKI: Notice: MODULE: Init MESSAGE: Program should be run 'as Administrator' to ensure all access rights to process memory and file objects.
+--20251210T01:48:54Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Setting LOKI process with PID: 21392 to priority IDLE
+--20251210T01:48:55Z ADAM-PC LOKI: Notice: MODULE: Init MESSAGE: Skipping process memory check. User has no admin rights.
+--20251210T01:48:55Z ADAM-PC LOKI: Info: MODULE: FileScan MESSAGE: Scanning Path C:\Users\Adam\Desktop\Dev\sample ...  
+--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\BlueScreenView.exe SCORE: 70 TYPE: EXE SIZE: 61024 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3E80> MD5: 6126f1221d29712c069ee28ef4186e24 SHA1: dc3b083deea57b413618f4e19d481f1d5bb50df0 SHA256: f5f52ec9c38e7123507fe362ba0a0cd0e3ac17b820813ec3bf435fa3a8135ed0 CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Thu Jan 29 09:11:02 2015 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a4: 'Nir Sofe'
+--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\FamiTracker.exe SCORE: 70 TYPE: EXE SIZE: 1400320 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3DC0> MD5: 3f442fde4a351874f30253748954e89f SHA1: 36f0d8aaf95fbb34e8fd2b1c15d8b25995067aa3 SHA256: aff6bb82e87cf24d9ffab6c515b8f1c681c1448c10209588e27418b5679ebf0a CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Mon Feb  2 13:29:17 2015 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a2: '11 025 Hz'
+--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\GooseDesktop.exe SCORE: 70 TYPE: EXE SIZE: 226304 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3D60> MD5: c883e2c769ebe56240a71260b17f1b93 SHA1: 4a831d4f48f6ea81db508c2a87cf860acd17edb1 SHA256: 943fd1ea44266c5d7fa02f2b292db095a4e6ba8027a1f6c73fd60d1165e63aff CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Tue Feb 11 15:16:54 2020 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a1: 'pat on back'
+--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\LearningProject-Debug.exe SCORE: 70 TYPE: EXE SIZE: 48128 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3BE0> MD5: d66cab085908313b380958bf79efa6c2 SHA1: 2e29aac0caeadbcbcfa986dd89e69d3a846c9712 SHA256: 9d4c4295c8304935acfc506c435a96996bc67f11387f7743c7b103a1180b8808 CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Sun Jun 15 23:23:25 2025 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a3: 'Hello', $a5: '\Adam\'
+--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\LearningProject-Release.exe SCORE: 70 TYPE: EXE SIZE: 10752 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3D00> MD5: d87cc9de15f38c23e8d093b0b5e80874 SHA1: 6fb9160b7b21d779b5ddf1c43e57fab942e8d3d0 SHA256: b05b0f8833f99034202c08735070356ce570fa274875cb1050691e9ff05cd216 CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Sun Jun 15 23:24:26 2025 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a3: 'Hello', $a5: '\Adam\'
+--20251210T01:48:55Z ADAM-PC LOKI: Notice: MODULE: Results MESSAGE: Results: 0 alerts, 5 warnings, 4 notices
+--20251210T01:48:55Z ADAM-PC LOKI: Result: MODULE: Results MESSAGE: Suspicious objects detected!
+--20251210T01:48:55Z ADAM-PC LOKI: Result: MODULE: Results MESSAGE: Loki recommends a deeper analysis of the suspicious objects.
+--20251210T01:48:55Z ADAM-PC LOKI: Info: MODULE: Results MESSAGE: Please report false positives via https://github.com/Neo23x0/signature-base
+--20251210T01:48:55Z ADAM-PC LOKI: Notice: MODULE: Results MESSAGE: Finished LOKI Scan SYSTEM: ADAM-PC TIME: 20251210T01:48:55Z
+-diff --git a/test.py b/test.py
+-deleted file mode 100644
+-index 7c9d513..0000000
+---- a/test.py
+-+++ /dev/null
+-@@ -1,120 +0,0 @@
+--#!/usr/bin/env python3
+--import pefile
+--from collections import defaultdict
+--import json
+--import os
+--from PackedAnalyzer import analyze_pe
+--import re
+--import subprocess
+--
+--
+--def summarize_imports(path):
+--    pe = pefile.PE(path)
+--
+--    imports = defaultdict(list)
+--
+--    if not hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
+--        # keep your old behaviour, but this is now per-file data
+--        return {"imports": {}, "note": "No import table found (possibly packed)."}
+--
+--    for entry in pe.DIRECTORY_ENTRY_IMPORT:
+--        dll = entry.dll.decode(errors="ignore")
+--        for imp in entry.imports:
+--            name = imp.name.decode(errors="ignore") if imp.name else None
+--            imports[dll].append(name)
+--
+--    summary = {
+--        dll: sorted(func for func in funcs if func)
+--        for dll, funcs in sorted(imports.items())
+--    }
+--
+--    return summary
+--
+--
+--def changeDir(newTargetDir):
+--    os.chdir(newTargetDir)
+--    fworking_directory = os.getcwd()
+--    print(f"[+] Working Directory is: {fworking_directory}")
+--    return None
+--
+--
+--def clearOldLogs(file_to_delete):
+--    if os.path.exists(file_to_delete):
+--        try:
+--            os.remove(file_to_delete)
+--            print(f"[+] Removed old log file: {file_to_delete}")
+--        except OSError:
+--            # if we can't delete it, just carry on
+--            pass
+--
+--
+--def getFilesToScan():
+--    # Read complete log file as a single string
+--    with open(r"lokiOut.txt", "r", encoding="utf-8", errors="ignore") as handle:
+--        log_text = handle.read()
+--
+--    pattern = re.compile(r"FILE:\s*(.*?)\s+SCORE:")
+--    filepaths = pattern.findall(log_text)
+--    return filepaths
+--
+--
+--def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"):
+--    lokiDir = sWorkingDir + r"\Loki"
+--    print(lokiDir)
+--    os.chdir(lokiDir)
+--    # Run Loki on Sample Folder, save Output as lokiOut
+--    subprocess.run(
+--        ["loki.exe", "-p", sdirectoryToScan, "-l", "lokiOut.txt"],
+--        shell=True
+--    )
+--    # Move Output one folder up because that is where this file is running
+--    subprocess.run("powershell cp lokiOut.txt ..", shell=True)
+--    os.chdir(sWorkingDir)
+--    print(f"[+] Ran Loki on directory {sdirectoryToScan}")
+--    return None
+--
+--
+--if __name__ == "__main__":
+--    directoryToScan = r"C:\Users\Adam\Desktop\Dev\sample"  # ToDo Update
+--    logDir = r"summary.json"                               # Output file name
+--
+--    workingDirectory = os.path.dirname(os.path.abspath(__file__))
+--    changeDir(workingDirectory)
+--    clearOldLogs(logDir)
+--
+--    # 1) Run Loki and parse the hit list
+--    runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory)
+--    listofBinaries = getFilesToScan()
+--
+--    samples = []  # we'll collect per-file records here
+--
+--    # 2) For each binary Loki flagged, run your analyses
+--    for binaryToAnalyze in listofBinaries:
+--        clean = os.path.normpath(binaryToAnalyze)
+--        print(f"[+] Analyzing {clean}")
+--
+--        importsResult = summarize_imports(clean)
+--        packedResult = analyze_pe(clean)
+--
+--        # Prefer the path from analyze_pe if present
+--        file_path = packedResult.get("file", clean)
+--
+--        # Strip the top-level 'file' key out of pe_analysis payload
+--        pe_analysis = {k: v for k, v in packedResult.items() if k != "file"}
+--
+--        samples.append({
+--            "file": file_path,
+--            "imports": importsResult,
+--            "pe_analysis": pe_analysis
+--        })
+--
+--    # 3) Write ONE valid JSON document:
+--    # {
+--    #   "samples": [ {...}, {...}, ... ]
+--    # }
+--    with open(logDir, "w", encoding="utf-8") as f:
+--        json.dump({"samples": samples}, f, indent=2)
+--
+--    print(f"[+] Saved analysis to {logDir}")
+--    print("Enter any key to exit")
+--    input()
+-diff --git a/todo.log b/todo.log
+-deleted file mode 100644
+-index 96ca7d8..0000000
+---- a/todo.log
+-+++ /dev/null
+-@@ -1 +0,0 @@
+--./ProjectAnalyze.sh:grep --exclude="todo.log" -r "#TODD" . > todo.log
+-diff --git a/workingTree.log b/workingTree.log
+-deleted file mode 100644
+-index 9c558e3..0000000
+---- a/workingTree.log
+-+++ /dev/null
+-@@ -1 +0,0 @@
+--.
 -
 -
 -[0;32mNew and Modified[1;37m
@@ -503,173 +690,1503 @@ index 1905cc7..2a376e5 100644
 -
 -
 -[0;32mRemoved files:[1;37m
--CS1XA3
+-GPTRefactor.py
+-capstonetest.py
+-error.log
+-lokiOut.txt
+-test.py
+-todo.log
+-workingTree.log
 diff --git a/error.log b/error.log
 deleted file mode 100644
 index e69de29..0000000
-diff --git a/lokiOut.txt b/lokiOut.txt
+diff --git a/summary.json b/summary.json
 deleted file mode 100644
-index f6456dd..0000000
---- a/lokiOut.txt
+index 363fa12..0000000
+--- a/summary.json
 +++ /dev/null
-@@ -1,25 +0,0 @@
--20251210T01:48:50Z ADAM-PC LOKI: Notice: MODULE: Init MESSAGE: Starting Loki Scan VERSION: 0.51.0 SYSTEM: ADAM-PC TIME: 20251210T01:48:50Z PLATFORM: 10 10.0.26200 SP0 Multiprocessor Free PROC: AMD64 Family 23 Model 24 Stepping 1, AuthenticAMD ARCH: 64bit WindowsPE
--20251210T01:48:50Z ADAM-PC LOKI: Notice: MODULE: PESieve MESSAGE: PE-Sieve successfully initialized BINARY: C:\Users\Adam\Desktop\Dev\Loki\tools\pe-sieve64.exe SOURCE: https://github.com/hasherezade/pe-sieve
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: File Name Characteristics initialized with 3818 regex patterns
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: C2 server indicators initialized with 1773 elements
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Malicious MD5 Hashes initialized with 986 hashes
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Malicious SHA1 Hashes initialized with 893 hashes
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Malicious SHA256 Hashes initialized with 1174 hashes
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: False Positive Hashes initialized with 0 hashes
--20251210T01:48:51Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Processing YARA rules folder C:\Users\Adam\Desktop\Dev\Loki\signature-base\yara
--20251210T01:48:54Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Initializing all YARA rules at once (composed string of all rule files)
--20251210T01:48:54Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Initialized 1043 Yara rules
--20251210T01:48:54Z ADAM-PC LOKI: Notice: MODULE: Init MESSAGE: Program should be run 'as Administrator' to ensure all access rights to process memory and file objects.
--20251210T01:48:54Z ADAM-PC LOKI: Info: MODULE: Init MESSAGE: Setting LOKI process with PID: 21392 to priority IDLE
--20251210T01:48:55Z ADAM-PC LOKI: Notice: MODULE: Init MESSAGE: Skipping process memory check. User has no admin rights.
--20251210T01:48:55Z ADAM-PC LOKI: Info: MODULE: FileScan MESSAGE: Scanning Path C:\Users\Adam\Desktop\Dev\sample ...  
--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\BlueScreenView.exe SCORE: 70 TYPE: EXE SIZE: 61024 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3E80> MD5: 6126f1221d29712c069ee28ef4186e24 SHA1: dc3b083deea57b413618f4e19d481f1d5bb50df0 SHA256: f5f52ec9c38e7123507fe362ba0a0cd0e3ac17b820813ec3bf435fa3a8135ed0 CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Thu Jan 29 09:11:02 2015 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a4: 'Nir Sofe'
--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\FamiTracker.exe SCORE: 70 TYPE: EXE SIZE: 1400320 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3DC0> MD5: 3f442fde4a351874f30253748954e89f SHA1: 36f0d8aaf95fbb34e8fd2b1c15d8b25995067aa3 SHA256: aff6bb82e87cf24d9ffab6c515b8f1c681c1448c10209588e27418b5679ebf0a CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Mon Feb  2 13:29:17 2015 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a2: '11 025 Hz'
--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\GooseDesktop.exe SCORE: 70 TYPE: EXE SIZE: 226304 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3D60> MD5: c883e2c769ebe56240a71260b17f1b93 SHA1: 4a831d4f48f6ea81db508c2a87cf860acd17edb1 SHA256: 943fd1ea44266c5d7fa02f2b292db095a4e6ba8027a1f6c73fd60d1165e63aff CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Tue Feb 11 15:16:54 2020 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a1: 'pat on back'
--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\LearningProject-Debug.exe SCORE: 70 TYPE: EXE SIZE: 48128 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3BE0> MD5: d66cab085908313b380958bf79efa6c2 SHA1: 2e29aac0caeadbcbcfa986dd89e69d3a846c9712 SHA256: 9d4c4295c8304935acfc506c435a96996bc67f11387f7743c7b103a1180b8808 CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Sun Jun 15 23:23:25 2025 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a3: 'Hello', $a5: '\Adam\'
--20251210T01:48:55Z ADAM-PC LOKI: Warning: MODULE: FileScan MESSAGE: FILE: C:\Users\Adam\Desktop\Dev\sample\LearningProject-Release.exe SCORE: 70 TYPE: EXE SIZE: 10752 FIRST_BYTES: 4d5a90000300000004000000ffff0000b8000000 / <filter object at 0x0000029D42BD3D00> MD5: d87cc9de15f38c23e8d093b0b5e80874 SHA1: 6fb9160b7b21d779b5ddf1c43e57fab942e8d3d0 SHA256: b05b0f8833f99034202c08735070356ce570fa274875cb1050691e9ff05cd216 CREATED: Tue Dec  9 17:42:12 2025 MODIFIED: Sun Jun 15 23:24:26 2025 ACCESSED: Tue Dec  9 20:48:55 2025 REASON_1: Yara Rule MATCH: Lab05 SUBSCORE: 70 DESCRIPTION: Designed to detect five sample Binaries REF: - AUTHOR: Adam Cianfarani MATCHES: $a3: 'Hello', $a5: '\Adam\'
--20251210T01:48:55Z ADAM-PC LOKI: Notice: MODULE: Results MESSAGE: Results: 0 alerts, 5 warnings, 4 notices
--20251210T01:48:55Z ADAM-PC LOKI: Result: MODULE: Results MESSAGE: Suspicious objects detected!
--20251210T01:48:55Z ADAM-PC LOKI: Result: MODULE: Results MESSAGE: Loki recommends a deeper analysis of the suspicious objects.
--20251210T01:48:55Z ADAM-PC LOKI: Info: MODULE: Results MESSAGE: Please report false positives via https://github.com/Neo23x0/signature-base
--20251210T01:48:55Z ADAM-PC LOKI: Notice: MODULE: Results MESSAGE: Finished LOKI Scan SYSTEM: ADAM-PC TIME: 20251210T01:48:55Z
-diff --git a/test.py b/test.py
-deleted file mode 100644
-index 7c9d513..0000000
---- a/test.py
-+++ /dev/null
-@@ -1,120 +0,0 @@
--#!/usr/bin/env python3
--import pefile
--from collections import defaultdict
--import json
--import os
--from PackedAnalyzer import analyze_pe
--import re
--import subprocess
--
--
--def summarize_imports(path):
--    pe = pefile.PE(path)
--
--    imports = defaultdict(list)
--
--    if not hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
--        # keep your old behaviour, but this is now per-file data
--        return {"imports": {}, "note": "No import table found (possibly packed)."}
--
--    for entry in pe.DIRECTORY_ENTRY_IMPORT:
--        dll = entry.dll.decode(errors="ignore")
--        for imp in entry.imports:
--            name = imp.name.decode(errors="ignore") if imp.name else None
--            imports[dll].append(name)
--
--    summary = {
--        dll: sorted(func for func in funcs if func)
--        for dll, funcs in sorted(imports.items())
+@@ -1,1473 +0,0 @@
+-{
+-  "samples": [
+-    {
+-      "file": "C:\\Users\\Adam\\Desktop\\Dev\\sample\\BlueScreenView.exe",
+-      "imports": {
+-        "ADVAPI32.dll": [
+-          "RegCloseKey"
+-        ],
+-        "GDI32.dll": [
+-          "PatBlt"
+-        ],
+-        "KERNEL32.DLL": [
+-          "ExitProcess",
+-          "GetProcAddress",
+-          "LoadLibraryA",
+-          "VirtualAlloc",
+-          "VirtualFree",
+-          "VirtualProtect"
+-        ],
+-        "SHELL32.dll": [
+-          "DragFinish"
+-        ],
+-        "USER32.dll": [
+-          "GetDC"
+-        ],
+-        "VERSION.dll": [
+-          "VerQueryValueW"
+-        ],
+-        "comdlg32.dll": [
+-          "FindTextW"
+-        ],
+-        "msvcrt.dll": [
+-          "exit"
+-        ],
+-        "ole32.dll": [
+-          "CoInitialize"
+-        ]
+-      },
+-      "capabilities": {
+-        "uses_registry": true,
+-        "uses_network": false,
+-        "uses_crypto": false,
+-        "can_inject_into_other_processes": false,
+-        "can_persist_via_services": false,
+-        "interesting_apis": [
+-          "getprocaddress",
+-          "loadlibrarya",
+-          "virtualalloc",
+-          "virtualprotect"
+-        ]
+-      },
+-      "strings_summary": {
+-        "num_strings": 953,
+-        "sample_strings": [
+-          "!This program cannot be run in DOS mode.",
+-          "JRich",
+-          "UPX0",
+-          "UPX1",
+-          ".rsrc",
+-          "3.03",
+-          "UPX!",
+-          ")4Bf",
+-          "Pj0h",
+-          "_bQQ",
+-          "'fnn",
+-          "~{&9",
+-          "u&vs",
+-          "m30j",
+-          "|t'p",
+-          "h`'AK",
+-          "ud){w",
+-          "xZib",
+-          "6:u$",
+-          "BNt'-"
+-        ],
+-        "domains": [
+-          "crl.comodoca.com",
+-          "crl.usertrust.com",
+-          "crt.comodoca.com",
+-          "crt.usertrust.com",
+-          "secure.comodo.net"
+-        ],
+-        "ips": [
+-          "6.0.0.0"
+-        ],
+-        "suspicious_process_names": [],
+-        "keywords": [
+-          "shell"
+-        ]
+-      },
+-      "code_summary": {
+-        "ep_offset": 43552,
+-        "instructions_analyzed": 64,
+-        "num_calls": 0,
+-        "num_jumps": 13,
+-        "num_push": 1,
+-        "num_xor": 2,
+-        "top_mnemonics": [
+-          [
+-            "mov",
+-            12
+-          ],
+-          [
+-            "adc",
+-            9
+-          ],
+-          [
+-            "jne",
+-            7
+-          ],
+-          [
+-            "sub",
+-            7
+-          ],
+-          [
+-            "nop",
+-            6
+-          ],
+-          [
+-            "add",
+-            6
+-          ],
+-          [
+-            "inc",
+-            4
+-          ],
+-          [
+-            "jb",
+-            2
+-          ],
+-          [
+-            "jae",
+-            2
+-          ],
+-          [
+-            "xor",
+-            2
+-          ]
+-        ]
+-      },
+-      "pe_analysis": {
+-        "size_bytes": 61024,
+-        "num_sections": 3,
+-        "packed_score": 95,
+-        "sections": [
+-          {
+-            "name": "UPX0",
+-            "entropy": 0.0,
+-            "size_raw": 0,
+-            "size_virtual": 77824,
+-            "is_executable": true
+-          },
+-          {
+-            "name": "UPX1",
+-            "entropy": 7.912459879629103,
+-            "size_raw": 43008,
+-            "size_virtual": 45056,
+-            "is_executable": true
+-          },
+-          {
+-            "name": ".rsrc",
+-            "entropy": 3.8163186024957683,
+-            "size_raw": 10752,
+-            "size_virtual": 12288,
+-            "is_executable": false
+-          }
+-        ],
+-        "high_entropy_sections": [
+-          "UPX1"
+-        ],
+-        "suspicious_section_names": [
+-          "UPX0",
+-          "UPX1"
+-        ],
+-        "entry_point_section": "UPX1",
+-        "num_imports": 14,
+-        "imports_by_dll": {
+-          "kernel32.dll": 6,
+-          "advapi32.dll": 1,
+-          "comdlg32.dll": 1,
+-          "gdi32.dll": 1,
+-          "msvcrt.dll": 1,
+-          "ole32.dll": 1,
+-          "shell32.dll": 1,
+-          "user32.dll": 1,
+-          "version.dll": 1
+-        },
+-        "suspicious_apis": [
+-          "GetProcAddress",
+-          "LoadLibraryA",
+-          "VirtualAlloc",
+-          "VirtualProtect"
+-        ],
+-        "overlay_size": 6240,
+-        "relocations_stripped": true,
+-        "entropy_mean": 3.9095928273749574,
+-        "entropy_max": 7.912459879629103,
+-        "packed_verdict": "likely_packed"
+-      }
+-    },
+-    {
+-      "file": "C:\\Users\\Adam\\Desktop\\Dev\\sample\\FamiTracker.exe",
+-      "imports": {
+-        "ADVAPI32.dll": [
+-          "GetFileSecurityA",
+-          "RegCloseKey",
+-          "RegCreateKeyA",
+-          "RegCreateKeyExA",
+-          "RegDeleteKeyA",
+-          "RegDeleteValueA",
+-          "RegEnumKeyA",
+-          "RegOpenKeyA",
+-          "RegOpenKeyExA",
+-          "RegOverridePredefKey",
+-          "RegQueryValueA",
+-          "RegQueryValueExA",
+-          "RegSetValueA",
+-          "RegSetValueExA",
+-          "SetFileSecurityA"
+-        ],
+-        "COMDLG32.dll": [
+-          "GetFileTitleA"
+-        ],
+-        "GDI32.dll": [
+-          "BitBlt",
+-          "CopyMetaFileA",
+-          "CreateBitmap",
+-          "CreateCompatibleBitmap",
+-          "CreateCompatibleDC",
+-          "CreateFontA",
+-          "CreateFontIndirectA",
+-          "CreatePatternBrush",
+-          "CreatePen",
+-          "CreateSolidBrush",
+-          "DeleteDC",
+-          "DeleteObject",
+-          "EnumFontFamiliesExA",
+-          "Escape",
+-          "ExcludeClipRect",
+-          "ExtTextOutA",
+-          "GetBitmapDimensionEx",
+-          "GetBkColor",
+-          "GetCharWidthA",
+-          "GetClipBox",
+-          "GetDeviceCaps",
+-          "GetObjectA",
+-          "GetPixel",
+-          "GetStockObject",
+-          "GetTextExtentPoint32A",
+-          "GetTextMetricsA",
+-          "IntersectClipRect",
+-          "LineTo",
+-          "MoveToEx",
+-          "OffsetViewportOrgEx",
+-          "OffsetWindowOrgEx",
+-          "Polygon",
+-          "PtVisible",
+-          "RectVisible",
+-          "Rectangle",
+-          "RestoreDC",
+-          "SaveDC",
+-          "ScaleViewportExtEx",
+-          "ScaleWindowExtEx",
+-          "SelectObject",
+-          "SetBitmapDimensionEx",
+-          "SetBkColor",
+-          "SetBkMode",
+-          "SetMapMode",
+-          "SetTextColor",
+-          "SetViewportExtEx",
+-          "SetViewportOrgEx",
+-          "SetWindowExtEx",
+-          "SetWindowOrgEx",
+-          "StretchDIBits",
+-          "TextOutA"
+-        ],
+-        "KERNEL32.dll": [
+-          "AttachConsole",
+-          "CloseHandle",
+-          "CompareStringA",
+-          "CompareStringW",
+-          "ConvertDefaultLocale",
+-          "CopyFileA",
+-          "CreateEventA",
+-          "CreateFileA",
+-          "CreateFileMappingA",
+-          "CreateMutexA",
+-          "CreateThread",
+-          "DeleteCriticalSection",
+-          "DeleteFileA",
+-          "DuplicateHandle",
+-          "EnterCriticalSection",
+-          "EnumResourceLanguagesA",
+-          "EnumSystemLocalesA",
+-          "ExitProcess",
+-          "ExitThread",
+-          "FileTimeToLocalFileTime",
+-          "FileTimeToSystemTime",
+-          "FindClose",
+-          "FindFirstFileA",
+-          "FindNextFileA",
+-          "FindResourceA",
+-          "FindResourceExA",
+-          "FlushFileBuffers",
+-          "FormatMessageA",
+-          "FreeEnvironmentStringsA",
+-          "FreeEnvironmentStringsW",
+-          "FreeLibrary",
+-          "FreeResource",
+-          "GetACP",
+-          "GetCPInfo",
+-          "GetCommandLineA",
+-          "GetConsoleCP",
+-          "GetConsoleMode",
+-          "GetConsoleOutputCP",
+-          "GetCurrentDirectoryA",
+-          "GetCurrentProcess",
+-          "GetCurrentProcessId",
+-          "GetCurrentThread",
+-          "GetCurrentThreadId",
+-          "GetDiskFreeSpaceA",
+-          "GetDriveTypeA",
+-          "GetEnvironmentStrings",
+-          "GetEnvironmentStringsW",
+-          "GetFileAttributesA",
+-          "GetFileAttributesExA",
+-          "GetFileSize",
+-          "GetFileSizeEx",
+-          "GetFileTime",
+-          "GetFileType",
+-          "GetFullPathNameA",
+-          "GetLastError",
+-          "GetLocaleInfoA",
+-          "GetLocaleInfoW",
+-          "GetModuleFileNameA",
+-          "GetModuleFileNameW",
+-          "GetModuleHandleA",
+-          "GetModuleHandleW",
+-          "GetOEMCP",
+-          "GetPrivateProfileIntA",
+-          "GetPrivateProfileStringA",
+-          "GetProcAddress",
+-          "GetProcessHeap",
+-          "GetProfileIntA",
+-          "GetShortPathNameA",
+-          "GetStartupInfoA",
+-          "GetStdHandle",
+-          "GetStringTypeA",
+-          "GetStringTypeExA",
+-          "GetStringTypeW",
+-          "GetSystemDirectoryW",
+-          "GetSystemTimeAsFileTime",
+-          "GetTempFileNameA",
+-          "GetTempPathA",
+-          "GetThreadLocale",
+-          "GetThreadTimes",
+-          "GetTickCount",
+-          "GetTimeZoneInformation",
+-          "GetUserDefaultLCID",
+-          "GetVersionExA",
+-          "GetVolumeInformationA",
+-          "GlobalAddAtomA",
+-          "GlobalAlloc",
+-          "GlobalDeleteAtom",
+-          "GlobalFindAtomA",
+-          "GlobalFlags",
+-          "GlobalFree",
+-          "GlobalGetAtomNameA",
+-          "GlobalHandle",
+-          "GlobalLock",
+-          "GlobalReAlloc",
+-          "GlobalSize",
+-          "GlobalUnlock",
+-          "HeapAlloc",
+-          "HeapCreate",
+-          "HeapFree",
+-          "HeapReAlloc",
+-          "HeapSize",
+-          "InitializeCriticalSection",
+-          "InitializeCriticalSectionAndSpinCount",
+-          "InterlockedDecrement",
+-          "InterlockedExchange",
+-          "InterlockedIncrement",
+-          "IsDebuggerPresent",
+-          "IsValidCodePage",
+-          "IsValidLocale",
+-          "LCMapStringA",
+-          "LCMapStringW",
+-          "LeaveCriticalSection",
+-          "LoadLibraryA",
+-          "LoadLibraryExA",
+-          "LoadLibraryW",
+-          "LoadResource",
+-          "LocalAlloc",
+-          "LocalFileTimeToFileTime",
+-          "LocalFree",
+-          "LocalReAlloc",
+-          "LockFile",
+-          "LockResource",
+-          "MapViewOfFile",
+-          "MoveFileA",
+-          "MoveFileExA",
+-          "MulDiv",
+-          "MultiByteToWideChar",
+-          "OpenFileMappingA",
+-          "QueryPerformanceCounter",
+-          "RaiseException",
+-          "ReadFile",
+-          "ReleaseMutex",
+-          "ResumeThread",
+-          "RtlUnwind",
+-          "SetEndOfFile",
+-          "SetEnvironmentVariableA",
+-          "SetErrorMode",
+-          "SetEvent",
+-          "SetFilePointer",
+-          "SetFileTime",
+-          "SetHandleCount",
+-          "SetLastError",
+-          "SetStdHandle",
+-          "SetThreadPriority",
+-          "SetUnhandledExceptionFilter",
+-          "SizeofResource",
+-          "Sleep",
+-          "SuspendThread",
+-          "SystemTimeToFileTime",
+-          "TerminateProcess",
+-          "TlsAlloc",
+-          "TlsFree",
+-          "TlsGetValue",
+-          "TlsSetValue",
+-          "UnhandledExceptionFilter",
+-          "UnlockFile",
+-          "UnmapViewOfFile",
+-          "VirtualAlloc",
+-          "VirtualFree",
+-          "VirtualProtect",
+-          "WaitForMultipleObjects",
+-          "WaitForSingleObject",
+-          "WideCharToMultiByte",
+-          "WriteConsoleA",
+-          "WriteConsoleW",
+-          "WriteFile",
+-          "WritePrivateProfileStringA",
+-          "lstrcmpA",
+-          "lstrcmpW",
+-          "lstrcmpiA",
+-          "lstrlenA",
+-          "lstrlenW"
+-        ],
+-        "MSIMG32.dll": [
+-          "GradientFill"
+-        ],
+-        "OLEAUT32.dll": [
+-          "SysAllocStringLen",
+-          "VariantChangeType",
+-          "VariantClear",
+-          "VariantInit"
+-        ],
+-        "SHELL32.dll": [
+-          "DragAcceptFiles",
+-          "DragFinish",
+-          "DragQueryFileA",
+-          "ExtractIconA",
+-          "SHBrowseForFolderA",
+-          "SHGetFileInfoA",
+-          "SHGetPathFromIDListA",
+-          "ShellExecuteA"
+-        ],
+-        "SHLWAPI.dll": [
+-          "PathAppendA",
+-          "PathFindExtensionA",
+-          "PathFindFileNameA",
+-          "PathIsUNCA",
+-          "PathRemoveExtensionA",
+-          "PathRemoveFileSpecA",
+-          "PathRemoveFileSpecW",
+-          "PathStripToRootA"
+-        ],
+-        "USER32.dll": [
+-          "AdjustWindowRectEx",
+-          "AppendMenuA",
+-          "BeginDeferWindowPos",
+-          "BeginPaint",
+-          "BringWindowToTop",
+-          "CallNextHookEx",
+-          "CallWindowProcA",
+-          "CharUpperA",
+-          "CheckDlgButton",
+-          "CheckMenuItem",
+-          "CheckMenuRadioItem",
+-          "ClientToScreen",
+-          "CloseClipboard",
+-          "CopyRect",
+-          "CreateAcceleratorTableA",
+-          "CreateDialogIndirectParamA",
+-          "CreatePopupMenu",
+-          "CreateWindowExA",
+-          "DefWindowProcA",
+-          "DeferWindowPos",
+-          "DeleteMenu",
+-          "DestroyAcceleratorTable",
+-          "DestroyIcon",
+-          "DestroyMenu",
+-          "DestroyWindow",
+-          "DispatchMessageA",
+-          "DrawEdge",
+-          "DrawFocusRect",
+-          "DrawTextA",
+-          "DrawTextExA",
+-          "EmptyClipboard",
+-          "EnableMenuItem",
+-          "EnableScrollBar",
+-          "EnableWindow",
+-          "EndDeferWindowPos",
+-          "EndDialog",
+-          "EndPaint",
+-          "EqualRect",
+-          "FillRect",
+-          "GetActiveWindow",
+-          "GetAsyncKeyState",
+-          "GetCapture",
+-          "GetClassInfoA",
+-          "GetClassInfoExA",
+-          "GetClassLongA",
+-          "GetClassNameA",
+-          "GetClientRect",
+-          "GetClipboardData",
+-          "GetCursorPos",
+-          "GetDC",
+-          "GetDesktopWindow",
+-          "GetDlgCtrlID",
+-          "GetDlgItem",
+-          "GetDlgItemInt",
+-          "GetDlgItemTextA",
+-          "GetFocus",
+-          "GetForegroundWindow",
+-          "GetKeyNameTextA",
+-          "GetKeyState",
+-          "GetLastActivePopup",
+-          "GetMenu",
+-          "GetMenuCheckMarkDimensions",
+-          "GetMenuItemCount",
+-          "GetMenuItemID",
+-          "GetMenuItemInfoA",
+-          "GetMenuState",
+-          "GetMenuStringA",
+-          "GetMessageA",
+-          "GetMessagePos",
+-          "GetMessageTime",
+-          "GetNextDlgTabItem",
+-          "GetParent",
+-          "GetPropA",
+-          "GetScrollPos",
+-          "GetSubMenu",
+-          "GetSysColor",
+-          "GetSysColorBrush",
+-          "GetSystemMetrics",
+-          "GetTopWindow",
+-          "GetWindow",
+-          "GetWindowDC",
+-          "GetWindowLongA",
+-          "GetWindowPlacement",
+-          "GetWindowRect",
+-          "GetWindowTextA",
+-          "GetWindowTextLengthA",
+-          "GetWindowThreadProcessId",
+-          "GrayStringA",
+-          "InflateRect",
+-          "InsertMenuA",
+-          "InsertMenuItemA",
+-          "IntersectRect",
+-          "InvalidateRect",
+-          "IsChild",
+-          "IsClipboardFormatAvailable",
+-          "IsDialogMessageA",
+-          "IsDlgButtonChecked",
+-          "IsIconic",
+-          "IsRectEmpty",
+-          "IsWindow",
+-          "IsWindowEnabled",
+-          "IsWindowVisible",
+-          "IsZoomed",
+-          "KillTimer",
+-          "LoadAcceleratorsA",
+-          "LoadBitmapA",
+-          "LoadCursorA",
+-          "LoadIconA",
+-          "LoadImageA",
+-          "LoadMenuA",
+-          "MapDialogRect",
+-          "MapVirtualKeyA",
+-          "MapWindowPoints",
+-          "MessageBoxA",
+-          "ModifyMenuA",
+-          "MoveWindow",
+-          "OffsetRect",
+-          "OpenClipboard",
+-          "PeekMessageA",
+-          "PostMessageA",
+-          "PostQuitMessage",
+-          "PostThreadMessageA",
+-          "PtInRect",
+-          "RedrawWindow",
+-          "RegisterClassA",
+-          "RegisterClipboardFormatA",
+-          "RegisterWindowMessageA",
+-          "ReleaseCapture",
+-          "ReleaseDC",
+-          "RemoveMenu",
+-          "RemovePropA",
+-          "ReuseDDElParam",
+-          "ScreenToClient",
+-          "SendDlgItemMessageA",
+-          "SendMessageA",
+-          "SendMessageTimeoutA",
+-          "SetActiveWindow",
+-          "SetCapture",
+-          "SetClipboardData",
+-          "SetCursor",
+-          "SetDlgItemInt",
+-          "SetDlgItemTextA",
+-          "SetFocus",
+-          "SetForegroundWindow",
+-          "SetMenu",
+-          "SetMenuDefaultItem",
+-          "SetMenuItemBitmaps",
+-          "SetParent",
+-          "SetPropA",
+-          "SetRect",
+-          "SetRectEmpty",
+-          "SetScrollInfo",
+-          "SetScrollPos",
+-          "SetScrollRange",
+-          "SetTimer",
+-          "SetWindowLongA",
+-          "SetWindowPos",
+-          "SetWindowTextA",
+-          "SetWindowsHookExA",
+-          "ShowOwnedPopups",
+-          "ShowScrollBar",
+-          "ShowWindow",
+-          "SystemParametersInfoA",
+-          "TabbedTextOutA",
+-          "TrackMouseEvent",
+-          "TrackPopupMenu",
+-          "TranslateAcceleratorA",
+-          "TranslateMessage",
+-          "UnhookWindowsHookEx",
+-          "UnionRect",
+-          "UnpackDDElParam",
+-          "UnregisterClassA",
+-          "UpdateWindow",
+-          "ValidateRect",
+-          "WaitMessage",
+-          "WinHelpA",
+-          "WindowFromPoint"
+-        ],
+-        "VERSION.dll": [
+-          "GetFileVersionInfoA",
+-          "GetFileVersionInfoSizeA",
+-          "VerQueryValueA"
+-        ],
+-        "WINMM.dll": [
+-          "PlaySoundA",
+-          "midiInClose",
+-          "midiInGetDevCapsA",
+-          "midiInGetNumDevs",
+-          "midiInOpen",
+-          "midiInStart",
+-          "midiInStop",
+-          "midiOutClose",
+-          "midiOutGetDevCapsA",
+-          "midiOutGetNumDevs",
+-          "midiOutOpen",
+-          "midiOutReset",
+-          "midiOutShortMsg",
+-          "mmioAdvance",
+-          "mmioAscend",
+-          "mmioClose",
+-          "mmioCreateChunk",
+-          "mmioDescend",
+-          "mmioGetInfo",
+-          "mmioOpenA",
+-          "mmioSeek",
+-          "mmioSetInfo",
+-          "mmioWrite"
+-        ],
+-        "WINSPOOL.DRV": [
+-          "ClosePrinter",
+-          "DocumentPropertiesA",
+-          "OpenPrinterA"
+-        ],
+-        "dbghelp.dll": [
+-          "MiniDumpWriteDump"
+-        ],
+-        "ole32.dll": [
+-          "CoCreateInstance",
+-          "CoFreeUnusedLibraries",
+-          "CoInitializeEx",
+-          "CoLockObjectExternal",
+-          "CoRegisterMessageFilter",
+-          "CoRevokeClassObject",
+-          "CoTaskMemAlloc",
+-          "CoTaskMemFree",
+-          "CoUninitialize",
+-          "CreateStreamOnHGlobal",
+-          "DoDragDrop",
+-          "OleDuplicateData",
+-          "OleFlushClipboard",
+-          "OleGetClipboard",
+-          "OleInitialize",
+-          "OleIsCurrentClipboard",
+-          "OleUninitialize",
+-          "RegisterDragDrop",
+-          "ReleaseStgMedium",
+-          "RevokeDragDrop"
+-        ]
+-      },
+-      "capabilities": {
+-        "uses_registry": true,
+-        "uses_network": false,
+-        "uses_crypto": false,
+-        "can_inject_into_other_processes": false,
+-        "can_persist_via_services": false,
+-        "interesting_apis": [
+-          "getprocaddress",
+-          "loadlibrarya",
+-          "loadlibraryw",
+-          "mapviewoffile",
+-          "senddlgitemmessagea",
+-          "sendmessagea",
+-          "sendmessagetimeouta",
+-          "unmapviewoffile",
+-          "virtualalloc",
+-          "virtualprotect"
+-        ]
+-      },
+-      "strings_summary": {
+-        "num_strings": 5000,
+-        "sample_strings": [
+-          "!This program cannot be run in DOS mode.",
+-          "Rich",
+-          ".text",
+-          "`.rdata",
+-          "@.data",
+-          ".rsrc",
+-          "t$ Pj",
+-          "PPPP",
+-          "QQSV",
+-          "t.9Q",
+-          "QWSP",
+-          "_@[^",
+-          "_^[]",
+-          "QSVW",
+-          "h@yJ",
+-          "PhhyJ",
+-          "h\\yJ",
+-          "hTyJ",
+-          "hLyJ",
+-          "ShlzJ"
+-        ],
+-        "domains": [
+-          "famitracker.com",
+-          "www.famitracker.com"
+-        ],
+-        "ips": [],
+-        "suspicious_process_names": [],
+-        "keywords": [
+-          "hook",
+-          "shell",
+-          "startup"
+-        ]
+-      },
+-      "code_summary": {
+-        "ep_offset": 541989,
+-        "instructions_analyzed": 64,
+-        "num_calls": 3,
+-        "num_jumps": 3,
+-        "num_push": 15,
+-        "num_xor": 3,
+-        "top_mnemonics": [
+-          [
+-            "mov",
+-            16
+-          ],
+-          [
+-            "push",
+-            15
+-          ],
+-          [
+-            "call",
+-            3
+-          ],
+-          [
+-            "ret",
+-            3
+-          ],
+-          [
+-            "sub",
+-            3
+-          ],
+-          [
+-            "int3",
+-            3
+-          ],
+-          [
+-            "lea",
+-            3
+-          ],
+-          [
+-            "xor",
+-            3
+-          ],
+-          [
+-            "jmp",
+-            2
+-          ],
+-          [
+-            "add",
+-            2
+-          ]
+-        ]
+-      },
+-      "pe_analysis": {
+-        "size_bytes": 1400320,
+-        "num_sections": 4,
+-        "packed_score": 15,
+-        "sections": [
+-          {
+-            "name": ".text",
+-            "entropy": 6.61405022895749,
+-            "size_raw": 677888,
+-            "size_virtual": 677563,
+-            "is_executable": true
+-          },
+-          {
+-            "name": ".rdata",
+-            "entropy": 5.7365948691109,
+-            "size_raw": 247296,
+-            "size_virtual": 247288,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".data",
+-            "entropy": 4.667364399163468,
+-            "size_raw": 22016,
+-            "size_virtual": 472452,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".rsrc",
+-            "entropy": 5.285262071882253,
+-            "size_raw": 452096,
+-            "size_virtual": 451716,
+-            "is_executable": false
+-          }
+-        ],
+-        "high_entropy_sections": [],
+-        "suspicious_section_names": [],
+-        "entry_point_section": ".text",
+-        "num_imports": 487,
+-        "imports_by_dll": {
+-          "dbghelp.dll": 1,
+-          "winmm.dll": 23,
+-          "version.dll": 3,
+-          "kernel32.dll": 172,
+-          "user32.dll": 177,
+-          "gdi32.dll": 51,
+-          "msimg32.dll": 1,
+-          "comdlg32.dll": 1,
+-          "winspool.drv": 3,
+-          "advapi32.dll": 15,
+-          "shell32.dll": 8,
+-          "shlwapi.dll": 8,
+-          "ole32.dll": 20,
+-          "oleaut32.dll": 4
+-        },
+-        "suspicious_apis": [
+-          "GetProcAddress",
+-          "LoadLibraryA",
+-          "LoadLibraryW",
+-          "MapViewOfFile",
+-          "UnmapViewOfFile",
+-          "VirtualAlloc",
+-          "VirtualProtect"
+-        ],
+-        "overlay_size": 0,
+-        "relocations_stripped": true,
+-        "entropy_mean": 5.575817892278528,
+-        "entropy_max": 6.61405022895749,
+-        "packed_verdict": "unlikely_packed"
+-      }
+-    },
+-    {
+-      "file": "C:\\Users\\Adam\\Desktop\\Dev\\sample\\GooseDesktop.exe",
+-      "imports": {
+-        "mscoree.dll": [
+-          "_CorExeMain"
+-        ]
+-      },
+-      "capabilities": {
+-        "uses_registry": false,
+-        "uses_network": false,
+-        "uses_crypto": false,
+-        "can_inject_into_other_processes": false,
+-        "can_persist_via_services": false,
+-        "interesting_apis": []
+-      },
+-      "strings_summary": {
+-        "num_strings": 1378,
+-        "sample_strings": [
+-          "!This program cannot be run in DOS mode.",
+-          ".text",
+-          "`.rsrc",
+-          "@.reloc",
+-          "@YZe*",
+-          "?X*\"",
+-          "?X**",
+-          "?X*n",
+-          "?Zl(",
+-          "?X*>",
+-          "?Zl(",
+-          "k*n\"",
+-          "I@Zl(",
+-          "kYZ*^\"",
+-          "ZYl(",
+-          "kY*F\"",
+-          "?4#\"",
+-          "ZZYl(",
+-          "kYZ*\"",
+-          "@@Ye\""
+-        ],
+-        "domains": [],
+-        "ips": [
+-          "1.0.0.0",
+-          "11.0.0.0",
+-          "4.0.0.0"
+-        ],
+-        "suspicious_process_names": [],
+-        "keywords": [
+-          "inject"
+-        ]
+-      },
+-      "code_summary": {
+-        "ep_offset": 198970,
+-        "instructions_analyzed": 64,
+-        "num_calls": 0,
+-        "num_jumps": 1,
+-        "num_push": 1,
+-        "num_xor": 0,
+-        "top_mnemonics": [
+-          [
+-            "add",
+-            62
+-          ],
+-          [
+-            "jmp",
+-            1
+-          ],
+-          [
+-            "push",
+-            1
+-          ]
+-        ]
+-      },
+-      "pe_analysis": {
+-        "size_bytes": 226304,
+-        "num_sections": 3,
+-        "packed_score": 28,
+-        "sections": [
+-          {
+-            "name": ".text",
+-            "entropy": 5.870248861856881,
+-            "size_raw": 198656,
+-            "size_virtual": 198496,
+-            "is_executable": true
+-          },
+-          {
+-            "name": ".rsrc",
+-            "entropy": 7.822969616074481,
+-            "size_raw": 26624,
+-            "size_virtual": 26212,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".reloc",
+-            "entropy": 0.10191042566270775,
+-            "size_raw": 512,
+-            "size_virtual": 12,
+-            "is_executable": false
+-          }
+-        ],
+-        "high_entropy_sections": [
+-          ".rsrc"
+-        ],
+-        "suspicious_section_names": [],
+-        "entry_point_section": ".text",
+-        "num_imports": 1,
+-        "imports_by_dll": {
+-          "mscoree.dll": 1
+-        },
+-        "suspicious_apis": [],
+-        "overlay_size": 0,
+-        "relocations_stripped": false,
+-        "entropy_mean": 4.598376301198023,
+-        "entropy_max": 7.822969616074481,
+-        "packed_verdict": "unlikely_packed"
+-      }
+-    },
+-    {
+-      "file": "C:\\Users\\Adam\\Desktop\\Dev\\sample\\LearningProject-Debug.exe",
+-      "imports": {
+-        "KERNEL32.dll": [
+-          "FreeLibrary",
+-          "GetCurrentProcess",
+-          "GetCurrentProcessId",
+-          "GetCurrentThreadId",
+-          "GetLastError",
+-          "GetModuleHandleW",
+-          "GetProcAddress",
+-          "GetProcessHeap",
+-          "GetStartupInfoW",
+-          "GetSystemTimeAsFileTime",
+-          "HeapAlloc",
+-          "HeapFree",
+-          "InitializeSListHead",
+-          "IsDebuggerPresent",
+-          "IsProcessorFeaturePresent",
+-          "MultiByteToWideChar",
+-          "QueryPerformanceCounter",
+-          "RaiseException",
+-          "SetUnhandledExceptionFilter",
+-          "TerminateProcess",
+-          "UnhandledExceptionFilter",
+-          "VirtualQuery",
+-          "WideCharToMultiByte"
+-        ],
+-        "MSVCP140D.dll": [
+-          "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ",
+-          "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+-          "?fill@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEDXZ",
+-          "?flags@ios_base@std@@QBEHXZ",
+-          "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ",
+-          "?good@ios_base@std@@QBE_NXZ",
+-          "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ",
+-          "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z",
+-          "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z",
+-          "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE_JPBD_J@Z",
+-          "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEPAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ",
+-          "?uncaught_exception@std@@YA_NXZ",
+-          "?width@ios_base@std@@QAE_J_J@Z",
+-          "?width@ios_base@std@@QBE_JXZ"
+-        ],
+-        "VCRUNTIME140D.dll": [
+-          "__CxxFrameHandler3",
+-          "__current_exception",
+-          "__current_exception_context",
+-          "__std_type_info_destroy_list",
+-          "__vcrt_GetModuleFileNameW",
+-          "__vcrt_GetModuleHandleW",
+-          "__vcrt_LoadLibraryExW",
+-          "_except_handler4_common",
+-          "memset"
+-        ],
+-        "ucrtbased.dll": [
+-          "_CrtDbgReport",
+-          "_CrtDbgReportW",
+-          "__p___argc",
+-          "__p___argv",
+-          "__p__commode",
+-          "__setusermatherr",
+-          "__stdio_common_vsprintf_s",
+-          "_c_exit",
+-          "_cexit",
+-          "_configthreadlocale",
+-          "_configure_narrow_argv",
+-          "_controlfp_s",
+-          "_crt_at_quick_exit",
+-          "_crt_atexit",
+-          "_execute_onexit_table",
+-          "_exit",
+-          "_get_initial_narrow_environment",
+-          "_initialize_narrow_environment",
+-          "_initialize_onexit_table",
+-          "_initterm",
+-          "_initterm_e",
+-          "_register_onexit_function",
+-          "_register_thread_local_exe_atexit_callback",
+-          "_seh_filter_dll",
+-          "_seh_filter_exe",
+-          "_set_app_type",
+-          "_set_fmode",
+-          "_set_new_mode",
+-          "_wmakepath_s",
+-          "_wsplitpath_s",
+-          "exit",
+-          "strcat_s",
+-          "strcpy_s",
+-          "strlen",
+-          "terminate",
+-          "wcscpy_s"
+-        ]
+-      },
+-      "capabilities": {
+-        "uses_registry": false,
+-        "uses_network": false,
+-        "uses_crypto": false,
+-        "can_inject_into_other_processes": false,
+-        "can_persist_via_services": false,
+-        "interesting_apis": [
+-          "getprocaddress"
+-        ]
+-      },
+-      "strings_summary": {
+-        "num_strings": 221,
+-        "sample_strings": [
+-          "!This program cannot be run in DOS mode.",
+-          "Rich",
+-          ".textbss",
+-          ".text",
+-          "`.rdata",
+-          "@.data",
+-          ".idata",
+-          "@.msvcjmc7",
+-          ".00cfg",
+-          "@.rsrc",
+-          "@.reloc",
+-          "Y_^[",
+-          "SVWQ",
+-          "h(pA",
+-          "SVWQ",
+-          "Y_^[",
+-          "hPpA",
+-          "SVWQ",
+-          "Y_^[",
+-          "SVWQ"
+-        ],
+-        "domains": [],
+-        "ips": [],
+-        "suspicious_process_names": [],
+-        "keywords": [
+-          "startup"
+-        ]
+-      },
+-      "code_summary": {
+-        "ep_offset": 1954,
+-        "instructions_analyzed": 64,
+-        "num_calls": 0,
+-        "num_jumps": 17,
+-        "num_push": 0,
+-        "num_xor": 0,
+-        "top_mnemonics": [
+-          [
+-            "int3",
+-            47
+-          ],
+-          [
+-            "jmp",
+-            17
+-          ]
+-        ]
+-      },
+-      "pe_analysis": {
+-        "size_bytes": 48128,
+-        "num_sections": 9,
+-        "packed_score": 10,
+-        "sections": [
+-          {
+-            "name": ".textbss",
+-            "entropy": 0.0,
+-            "size_raw": 0,
+-            "size_virtual": 65536,
+-            "is_executable": true
+-          },
+-          {
+-            "name": ".text",
+-            "entropy": 4.107000398696458,
+-            "size_raw": 29184,
+-            "size_virtual": 28996,
+-            "is_executable": true
+-          },
+-          {
+-            "name": ".rdata",
+-            "entropy": 1.9854859642616798,
+-            "size_raw": 8704,
+-            "size_virtual": 8656,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".data",
+-            "entropy": 0.3443024675255742,
+-            "size_raw": 512,
+-            "size_virtual": 1440,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".idata",
+-            "entropy": 4.567713631269365,
+-            "size_raw": 4096,
+-            "size_virtual": 3907,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".msvcjmc",
+-            "entropy": 0.4359480597900055,
+-            "size_raw": 512,
+-            "size_virtual": 311,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".00cfg",
+-            "entropy": 0.06116285224115448,
+-            "size_raw": 512,
+-            "size_virtual": 260,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".rsrc",
+-            "entropy": 2.1404317318466357,
+-            "size_raw": 1536,
+-            "size_virtual": 1084,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".reloc",
+-            "entropy": 4.186502348644771,
+-            "size_raw": 2048,
+-            "size_virtual": 1560,
+-            "is_executable": false
+-          }
+-        ],
+-        "high_entropy_sections": [],
+-        "suspicious_section_names": [],
+-        "entry_point_section": ".text",
+-        "num_imports": 82,
+-        "imports_by_dll": {
+-          "msvcp140d.dll": 14,
+-          "vcruntime140d.dll": 9,
+-          "ucrtbased.dll": 36,
+-          "kernel32.dll": 23
+-        },
+-        "suspicious_apis": [
+-          "GetProcAddress"
+-        ],
+-        "overlay_size": 0,
+-        "relocations_stripped": false,
+-        "entropy_mean": 1.980949717141738,
+-        "entropy_max": 4.567713631269365,
+-        "packed_verdict": "unlikely_packed"
+-      }
+-    },
+-    {
+-      "file": "C:\\Users\\Adam\\Desktop\\Dev\\sample\\LearningProject-Release.exe",
+-      "imports": {
+-        "KERNEL32.dll": [
+-          "GetCurrentProcess",
+-          "GetCurrentProcessId",
+-          "GetCurrentThreadId",
+-          "GetModuleHandleW",
+-          "GetSystemTimeAsFileTime",
+-          "InitializeSListHead",
+-          "IsDebuggerPresent",
+-          "IsProcessorFeaturePresent",
+-          "QueryPerformanceCounter",
+-          "SetUnhandledExceptionFilter",
+-          "TerminateProcess",
+-          "UnhandledExceptionFilter"
+-        ],
+-        "MSVCP140.dll": [
+-          "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ",
+-          "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+-          "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ",
+-          "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z",
+-          "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z",
+-          "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE_JPBD_J@Z",
+-          "?uncaught_exception@std@@YA_NXZ"
+-        ],
+-        "VCRUNTIME140.dll": [
+-          "__CxxFrameHandler3",
+-          "__current_exception",
+-          "__current_exception_context",
+-          "__std_terminate",
+-          "_except_handler4_common",
+-          "memset"
+-        ],
+-        "api-ms-win-crt-heap-l1-1-0.dll": [
+-          "_set_new_mode"
+-        ],
+-        "api-ms-win-crt-locale-l1-1-0.dll": [
+-          "_configthreadlocale"
+-        ],
+-        "api-ms-win-crt-math-l1-1-0.dll": [
+-          "__setusermatherr"
+-        ],
+-        "api-ms-win-crt-runtime-l1-1-0.dll": [
+-          "__p___argc",
+-          "__p___argv",
+-          "_c_exit",
+-          "_cexit",
+-          "_configure_narrow_argv",
+-          "_controlfp_s",
+-          "_crt_atexit",
+-          "_exit",
+-          "_get_initial_narrow_environment",
+-          "_initialize_narrow_environment",
+-          "_initialize_onexit_table",
+-          "_initterm",
+-          "_initterm_e",
+-          "_register_onexit_function",
+-          "_register_thread_local_exe_atexit_callback",
+-          "_seh_filter_exe",
+-          "_set_app_type",
+-          "exit",
+-          "terminate"
+-        ],
+-        "api-ms-win-crt-stdio-l1-1-0.dll": [
+-          "__p__commode",
+-          "_set_fmode"
+-        ]
+-      },
+-      "capabilities": {
+-        "uses_registry": false,
+-        "uses_network": false,
+-        "uses_crypto": false,
+-        "can_inject_into_other_processes": false,
+-        "can_persist_via_services": false,
+-        "interesting_apis": []
+-      },
+-      "strings_summary": {
+-        "num_strings": 163,
+-        "sample_strings": [
+-          "!This program cannot be run in DOS mode.",
+-          "Rich",
+-          ".text",
+-          "`.rdata",
+-          "@.data",
+-          ".rsrc",
+-          "@.reloc",
+-          "h(1@",
+-          "Y_^[",
+-          "h 6@",
+-          "Y_^[",
+-          "h 1@",
+-          "==C@",
+-          "u\"h@C@",
+-          "hLC@",
+-          "h@6@",
+-          "Y_^[",
+-          "=<C@",
+-          "=@C@",
+-          "h@C@"
+-        ],
+-        "domains": [],
+-        "ips": [],
+-        "suspicious_process_names": [],
+-        "keywords": []
+-      },
+-      "code_summary": {
+-        "ep_offset": 2365,
+-        "instructions_analyzed": 64,
+-        "num_calls": 6,
+-        "num_jumps": 2,
+-        "num_push": 11,
+-        "num_xor": 0,
+-        "top_mnemonics": [
+-          [
+-            "mov",
+-            30
+-          ],
+-          [
+-            "push",
+-            11
+-          ],
+-          [
+-            "call",
+-            6
+-          ],
+-          [
+-            "pop",
+-            6
+-          ],
+-          [
+-            "imul",
+-            2
+-          ],
+-          [
+-            "jmp",
+-            1
+-          ],
+-          [
+-            "ret",
+-            1
+-          ],
+-          [
+-            "sub",
+-            1
+-          ],
+-          [
+-            "test",
+-            1
+-          ],
+-          [
+-            "je",
+-            1
+-          ]
+-        ]
+-      },
+-      "pe_analysis": {
+-        "size_bytes": 10752,
+-        "num_sections": 5,
+-        "packed_score": 0,
+-        "sections": [
+-          {
+-            "name": ".text",
+-            "entropy": 5.854189408276606,
+-            "size_raw": 4608,
+-            "size_virtual": 4107,
+-            "is_executable": true
+-          },
+-          {
+-            "name": ".rdata",
+-            "entropy": 4.784966594539135,
+-            "size_raw": 3584,
+-            "size_virtual": 3528,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".data",
+-            "entropy": 0.2804011676589459,
+-            "size_raw": 512,
+-            "size_virtual": 900,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".rsrc",
+-            "entropy": 4.696122618599126,
+-            "size_raw": 512,
+-            "size_virtual": 480,
+-            "is_executable": false
+-          },
+-          {
+-            "name": ".reloc",
+-            "entropy": 5.5436069566222885,
+-            "size_raw": 512,
+-            "size_virtual": 412,
+-            "is_executable": false
+-          }
+-        ],
+-        "high_entropy_sections": [],
+-        "suspicious_section_names": [],
+-        "entry_point_section": ".text",
+-        "num_imports": 49,
+-        "imports_by_dll": {
+-          "msvcp140.dll": 7,
+-          "vcruntime140.dll": 6,
+-          "api-ms-win-crt-runtime-l1-1-0.dll": 19,
+-          "api-ms-win-crt-math-l1-1-0.dll": 1,
+-          "api-ms-win-crt-stdio-l1-1-0.dll": 2,
+-          "api-ms-win-crt-locale-l1-1-0.dll": 1,
+-          "api-ms-win-crt-heap-l1-1-0.dll": 1,
+-          "kernel32.dll": 12
+-        },
+-        "suspicious_apis": [],
+-        "overlay_size": 0,
+-        "relocations_stripped": false,
+-        "entropy_mean": 4.23185734913922,
+-        "entropy_max": 5.854189408276606,
+-        "packed_verdict": "unlikely_packed"
+-      }
 -    }
--
--    return summary
--
--
--def changeDir(newTargetDir):
--    os.chdir(newTargetDir)
--    fworking_directory = os.getcwd()
--    print(f"[+] Working Directory is: {fworking_directory}")
--    return None
--
--
--def clearOldLogs(file_to_delete):
--    if os.path.exists(file_to_delete):
--        try:
--            os.remove(file_to_delete)
--            print(f"[+] Removed old log file: {file_to_delete}")
--        except OSError:
--            # if we can't delete it, just carry on
--            pass
--
--
--def getFilesToScan():
--    # Read complete log file as a single string
--    with open(r"lokiOut.txt", "r", encoding="utf-8", errors="ignore") as handle:
--        log_text = handle.read()
--
--    pattern = re.compile(r"FILE:\s*(.*?)\s+SCORE:")
--    filepaths = pattern.findall(log_text)
--    return filepaths
--
--
--def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"):
--    lokiDir = sWorkingDir + r"\Loki"
--    print(lokiDir)
--    os.chdir(lokiDir)
--    # Run Loki on Sample Folder, save Output as lokiOut
--    subprocess.run(
--        ["loki.exe", "-p", sdirectoryToScan, "-l", "lokiOut.txt"],
--        shell=True
--    )
--    # Move Output one folder up because that is where this file is running
--    subprocess.run("powershell cp lokiOut.txt ..", shell=True)
--    os.chdir(sWorkingDir)
--    print(f"[+] Ran Loki on directory {sdirectoryToScan}")
--    return None
--
--
--if __name__ == "__main__":
--    directoryToScan = r"C:\Users\Adam\Desktop\Dev\sample"  # ToDo Update
--    logDir = r"summary.json"                               # Output file name
--
--    workingDirectory = os.path.dirname(os.path.abspath(__file__))
--    changeDir(workingDirectory)
--    clearOldLogs(logDir)
--
--    # 1) Run Loki and parse the hit list
--    runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory)
--    listofBinaries = getFilesToScan()
--
--    samples = []  # we'll collect per-file records here
--
--    # 2) For each binary Loki flagged, run your analyses
--    for binaryToAnalyze in listofBinaries:
--        clean = os.path.normpath(binaryToAnalyze)
--        print(f"[+] Analyzing {clean}")
--
--        importsResult = summarize_imports(clean)
--        packedResult = analyze_pe(clean)
--
--        # Prefer the path from analyze_pe if present
--        file_path = packedResult.get("file", clean)
--
--        # Strip the top-level 'file' key out of pe_analysis payload
--        pe_analysis = {k: v for k, v in packedResult.items() if k != "file"}
--
--        samples.append({
--            "file": file_path,
--            "imports": importsResult,
--            "pe_analysis": pe_analysis
--        })
--
--    # 3) Write ONE valid JSON document:
--    # {
--    #   "samples": [ {...}, {...}, ... ]
--    # }
--    with open(logDir, "w", encoding="utf-8") as f:
--        json.dump({"samples": samples}, f, indent=2)
--
--    print(f"[+] Saved analysis to {logDir}")
--    print("Enter any key to exit")
--    input()
+-  ]
+-}
+\ No newline at end of file
 diff --git a/todo.log b/todo.log
 deleted file mode 100644
-index 96ca7d8..0000000
+index 863ee85..0000000
 --- a/todo.log
 +++ /dev/null
-@@ -1 +0,0 @@
+@@ -1,2 +0,0 @@
+-./changes.log:-./ProjectAnalyze.sh:grep --exclude="todo.log" -r "#TODD" . > todo.log
 -./ProjectAnalyze.sh:grep --exclude="todo.log" -r "#TODD" . > todo.log
 diff --git a/workingTree.log b/workingTree.log
 deleted file mode 100644
@@ -685,10 +2202,7 @@ changes.log
 
 
 [0;32mRemoved files:[1;37m
-GPTRefactor.py
-capstonetest.py
 error.log
-lokiOut.txt
-test.py
+summary.json
 todo.log
 workingTree.log
