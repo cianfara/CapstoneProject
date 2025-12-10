@@ -31,16 +31,7 @@ then
 	done
 fi
 
-git status
-echo "Adding changes to log"
-git diff > changes.log
-(echo -e "\n\n${Green}New and Modified${White}") >> changes.log 					#Overwrites the old log file
-git status -s | grep "?? \| M " | sed 's/.\{3\}//' >> changes.log    
-echo -e "\n\n${Green}Removed files:${White}" >> changes.log
-git status -s | grep " D " | sed 's/.\{3\}//' >> changes.log						#Appends actual code changes
-grep --exclude="todo.log" -r "#TODD" . > todo.log
 
-> error.log
 find . -name "*.hs" |
 while read checkHs
 do
