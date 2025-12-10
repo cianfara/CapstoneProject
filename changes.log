@@ -6,10 +6,10 @@ index 27f0b06..0000000
 @@ -1 +0,0 @@
 -Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
 diff --git a/changes.log b/changes.log
-index 5d279a6..e69de29 100644
+index 09dc651..e69de29 100644
 --- a/changes.log
 +++ b/changes.log
-@@ -1,64 +0,0 @@
+@@ -1,82 +0,0 @@
 -diff --git a/CS1XA3 b/CS1XA3
 -deleted file mode 160000
 -index 27f0b06..0000000
@@ -18,10 +18,10 @@ index 5d279a6..e69de29 100644
 -@@ -1 +0,0 @@
 --Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
 -diff --git a/changes.log b/changes.log
--index 3c384c3..e69de29 100644
+-index 5d279a6..e69de29 100644
 ---- a/changes.log
 -+++ b/changes.log
--@@ -1,46 +0,0 @@
+-@@ -1,64 +0,0 @@
 --diff --git a/CS1XA3 b/CS1XA3
 --deleted file mode 160000
 --index 27f0b06..0000000
@@ -30,35 +30,53 @@ index 5d279a6..e69de29 100644
 --@@ -1 +0,0 @@
 ---Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
 --diff --git a/changes.log b/changes.log
---index 973220e..e69de29 100644
+--index 3c384c3..e69de29 100644
 ----- a/changes.log
 --+++ b/changes.log
---@@ -1,28 +0,0 @@
----diff --git a/README.md b/README.md
----index e8352b9..92ca82b 100644
------- a/README.md
----+++ b/README.md
----@@ -1,2 +1,2 @@
-----# CapstoneProject
-----Work In Progress
----+# CapstoneProject
----+Work In Progress
+--@@ -1,46 +0,0 @@
+---diff --git a/CS1XA3 b/CS1XA3
+---deleted file mode 160000
+---index 27f0b06..0000000
+------ a/CS1XA3
+---+++ /dev/null
+---@@ -1 +0,0 @@
+----Subproject commit 27f0b0605da55368abb0615a4a2011112396b10f
+---diff --git a/changes.log b/changes.log
+---index 973220e..e69de29 100644
+------ a/changes.log
+---+++ b/changes.log
+---@@ -1,28 +0,0 @@
+----diff --git a/README.md b/README.md
+----index e8352b9..92ca82b 100644
+------- a/README.md
+----+++ b/README.md
+----@@ -1,2 +1,2 @@
+-----# CapstoneProject
+-----Work In Progress
+----+# CapstoneProject
+----+Work In Progress
+----
+----
+----[0;32mNew and Modified[1;37m
+----README.md
+----CS1XA3/
+----GPTRefactor.py
+----PackedAnalyzer.py
+----ProjectAnalyze.sh
+----Scanner.py
+----capstonetest.py
+----changes.log
+----error.log
+----lokiOut.txt
+----quickUpdate
+----summary.json
+----test.py
+----
+----
+----[0;32mRemoved files:[1;37m
 ---
 ---
 ---[0;32mNew and Modified[1;37m
----README.md
----CS1XA3/
----GPTRefactor.py
----PackedAnalyzer.py
----ProjectAnalyze.sh
----Scanner.py
----capstonetest.py
----changes.log
----error.log
----lokiOut.txt
----quickUpdate
----summary.json
----test.py
 ---
 ---
 ---[0;32mRemoved files:[1;37m
@@ -77,6 +95,8 @@ index 5d279a6..e69de29 100644
 
 
 [0;32mNew and Modified[1;37m
+changes.log
 
 
 [0;32mRemoved files:[1;37m
+CS1XA3
