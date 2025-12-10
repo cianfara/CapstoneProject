@@ -1,11 +1,12 @@
 # CapstoneProject
-1. Takes Loki Output
+1. Takes Loki Output and filters for yara matches
 2. Butchers with PEHeader checking Imports, Entropy, Signs of Packing
-3. Combines report with Loki
-4. Generates metadata with capstone
-5. (ToDo) Compiles to condensed JSON report
-6. (ToDo) Send to ChatGPT
+3. (ToDo) Combines report with Loki
+4. (ToDo) Generates metadata with capstone
+5. Compiles to condensed JSON report
+6. Send to ChatGPT
 7. (ToDo) Allow GPT to request actions with Capstone
+
 
 
 
