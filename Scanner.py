@@ -7,6 +7,10 @@ from PackedAnalyzer import analyze_pe
 import re
 import subprocess
 
+directoryToScan =   r"C:\Users\Adam\Desktop\Dev\sample"       #Update to change the scanning target
+logDir = r"summary.json"                                      #Update to change the name of the Output File
+
+
 def summarize_imports(path):
     pe = pefile.PE(path)
 
@@ -66,26 +70,35 @@ def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"): #Safe Default Dir to
 
 
 if __name__ == "__main__":
-    directoryToScan =   r"C:\Users\Adam\Desktop\Dev\sample"      #ToDo Update
-    logDir = r"summary.json"                                     #Update to change the name of the Output File
-    workingDirectory = os.path.dirname(os.path.abspath(__file__))
+    workingDirectory = os.path.dirname(os.path.abspath(__file__)) #Find where this script is running from
     changeDir(workingDirectory)                                 
-    clearOldLogs(logDir)                                            #Clear existing Output Logs
+    clearOldLogs(logDir)                                          #Clear existing Output Logs
 
     runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory)
-    listofBinaries = getFilesToScan()                            #Returns a list of Binaries detected by Loiki
-    
+    listofBinaries = getFilesToScan()                             #Returns a list of Binaries detected by Loki by running Regex on the Output log
+
+    results = []
+
     for binaryToAnalyze in listofBinaries:
         clean = os.path.normpath(binaryToAnalyze)
         print(f"[+] Analyzing {clean}")
-        importsResult = summarize_imports(binaryToAnalyze)  #Uses PEHeader to get list of imports used by binary
-        packedresult = analyze_pe(binaryToAnalyze)          #Runs stastical analysis and checks for indicators of a packed binary
+        importsResult = summarize_imports(binaryToAnalyze)
+        packedresult = analyze_pe(binaryToAnalyze)
 
-        with open(logDir, "a", encoding="utf-8") as f:      #Writes files to disk in JSON
-            json.dump(importsResult, f, indent=2)
-            json.dump(packedresult, f, indent=2)
+        # Build a combined object per file
+        results.append({
+            "path": clean,
+            "imports": importsResult,
+            "packing": packedresult,
+            # later: add capstone, strings, etc. here
+        })
+
+    # After the loop, write ONE valid JSON document
+    with open(logDir, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+
 
     print(f"[+] Saved analysis to {logDir}")
-
     print ("Enter any key to exit")
     input()
