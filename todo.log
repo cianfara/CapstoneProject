@@ -1,1 +1,2 @@
+./changes.log:-./ProjectAnalyze.sh:grep --exclude="todo.log" -r "#TODD" . > todo.log
 ./ProjectAnalyze.sh:grep --exclude="todo.log" -r "#TODD" . > todo.log
