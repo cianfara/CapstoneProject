@@ -6,6 +6,8 @@ from typing import Any
 SUMMARY_PATH = r"summary.json"
 
 
+
+
 def load_scan_json(path: str = SUMMARY_PATH) -> str:
     """
     Load the JSON file and return it as a string.
@@ -86,15 +88,14 @@ Respond ONLY in JSON with this exact shape:
 
 def changeDir(newTargetDir): #No Default as system gets file path before this
     os.chdir(newTargetDir)
-    fworking_directory = os.getcwd()
-    print(f"[+] Working Directory is: {fworking_directory}") #Verify we Moved to folder where ScanDir will be found
-    return None
+    return os.getcwd()
 
 
-def main() -> None:
+def sendLogsToGPT(sPath=SUMMARY_PATH):
     workingDirectory = os.path.dirname(os.path.abspath(__file__)) #Find where this script is running from
     changeDir(workingDirectory)
-    scan_json_text = load_scan_json()
+    scan_json_text = load_scan_json(sPath)
+    print(f"[+] Please wait for GPT Response")
     result_json_str = ask_openai_for_triage(scan_json_text)
 
     print("\n=== OpenAI triage result (JSON) ===\n")
@@ -103,7 +104,7 @@ def main() -> None:
     # Optional: save the model's triage to disk
     with open("triage_result.json", "w", encoding="utf-8") as f:
         f.write(result_json_str)
-
+    return result_json_str
 
 if __name__ == "__main__":
-    main()
+    sendLogsToGPT()

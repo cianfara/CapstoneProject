@@ -4,12 +4,12 @@ from collections import defaultdict
 import json
 import os
 from PackedAnalyzer import analyze_pe
+from GPTAnalysis import sendLogsToGPT
 import re
 import subprocess
 
 directoryToScan =   r"C:\Users\Adam\Desktop\Dev\sample"       #Update to change the scanning target
 logDir = r"summary.json"                                      #Update to change the name of the Output File
-
 
 def summarize_imports(path):
     pe = pefile.PE(path)
@@ -90,15 +90,20 @@ if __name__ == "__main__":
             "path": clean,
             "imports": importsResult,
             "packing": packedresult,
-            # later: add capstone, strings, etc. here
+            # ToDo: add capstone, strings, etc. here
         })
 
-    # After the loop, write ONE valid JSON document
+    # Now that loop is done we write as a single structure
     with open(logDir, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
-
-
     print(f"[+] Saved analysis to {logDir}")
+    print(f"[+] Sending Logs to GPT")
+    GPTResult = sendLogsToGPT()
+    if GPTResult==None:
+        print(f"[+] GPT Response not Recieved")
+    else:
+        print(f"[+] GPT Response Recieved")
+
     print ("Enter any key to exit")
     input()

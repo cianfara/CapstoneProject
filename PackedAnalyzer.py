@@ -36,6 +36,8 @@ def get_ep_section(pe):
             return name
     return None
 
+def doNothing():
+    pass
 
 def analyze_pe(path):
     pe = pefile.PE(path, fast_load=False)
