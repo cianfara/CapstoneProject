@@ -70,7 +70,7 @@ Respond ONLY in JSON with this exact shape:
             }
         },
         instructions=instructions,
-        temperature=0.2,
+        temperature=0,
         input=[
             {
                 "role": "user",
