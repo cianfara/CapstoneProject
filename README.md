@@ -11,6 +11,11 @@
 
 
 
+***Install***
+1. pip3 install pefile
+2. pip install capstone
+3. git clone https://github.com/cianfara/CapstoneProject
+4. Download and extract Loki to Capstone Folder https://github.com/Neo23x0/Loki/releases/tag/v0.51.0
 
 
 
