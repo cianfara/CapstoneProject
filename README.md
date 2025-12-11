@@ -4,8 +4,10 @@
 3. (ToDo) Combines report with Loki
 4. (ToDo) Generates metadata with capstone
 5. Compiles to condensed JSON report
-6. Send to ChatGPT
-7. (ToDo) Allow GPT to request actions with Capstone
+6. Send to ChatGPT. Request structured JSON reply
+7. (ToDo) Parse Json Reply
+8. (ToDo) Allow GPT to request actions with Capstone
+
 
 
 
