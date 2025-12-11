@@ -2,11 +2,10 @@
 1. Takes Loki Output and filters for yara matches
 2. Butchers with PEHeader checking Imports, Entropy, Signs of Packing
 3. Combines report with Loki
-4. Generates metadata with capstone
-5. Compiles to condensed JSON report
-6. Send to ChatGPT. Request structured JSON reply
-7. Parse Json Reply
-8. (ToDo) Allow GPT to request actions with Capstone
+4. Compiles to condensed JSON report
+5. Send to ChatGPT. Request structured JSON reply
+6. Parse Json Reply
+7. (ToDo) Allow GPT to request actions with Capstone
 
 
 
@@ -19,6 +18,7 @@
 https://github.com/Neo23x0/Loki/releases/tag/v0.51.0
 
 *NB Loki may generate a false positive detection when downloading in Chrome
+
 
 
 
