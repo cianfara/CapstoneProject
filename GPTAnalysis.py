@@ -62,7 +62,7 @@ Respond ONLY in JSON with this exact shape:
 
     # We use the Responses API, which is the recommended interface now. :contentReference[oaicite:2]{index=2}
     response = client.responses.create(
-        model="gpt-5.1",  # or "gpt-5.1-mini" / "gpt-4o-mini" if you want cheaper
+        model="gpt-5.1", 
         # enforce JSON output format
         text={
             "format": {
@@ -70,6 +70,7 @@ Respond ONLY in JSON with this exact shape:
             }
         },
         instructions=instructions,
+        temperature=0.2,
         input=[
             {
                 "role": "user",
@@ -99,7 +100,6 @@ def sendLogsToGPT(sPath=SUMMARY_PATH):
     result_json_str = ask_openai_for_triage(scan_json_text)
 
     print("\n=== OpenAI triage result (JSON) ===\n")
-    print(result_json_str)
 
     # Optional: save the model's triage to disk
     with open("triage_result.json", "w", encoding="utf-8") as f:

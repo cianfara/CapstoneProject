@@ -22,7 +22,25 @@ DEFAULT_IMPORT_CONFIG = {                                     #Do not modify, on
     "suspicious_keywords": [],
     "max_funcs_per_dll": 20,
 }
-
+    
+  
+ 
+ 
+ 
+logo = r"""
+   ____                   _                            
+  / ___|__ _ _ __  ____  | |_ ___  _ __   ___   
+ | |   / _  |  _ \/ ___| | __/ _ \|  _ \ / _ \  
+ | |__| (_| | |_)  \___ \| || (_) | | | |  __/ 
+  \____\____|  __/ ___) |\___\___/|_| |_|\___|   
+            |_|   |____/                                 
+    ____                                              
+   / ___|  ___ __ _ _ __  _ __   ___ _ __ 
+   \___ \ / __/ _  |  _ \|  _ \ / _ \  __|
+    ___) | (_| (_| | | | | | | |  __/ |  
+   |____/ \___\____|_| |_|_| |_|\___|_|  
+              ***Welcome!***                                      
+"""
 
 
 def summarize_imports(path):
@@ -196,7 +214,7 @@ def load_import_config(path="import_config.json"):
 
 
 
-
+#Simple load of json, once returned then each json key is exported to a global variable
 def load_import_config(path="import_config.json"):
     cfg = DEFAULT_IMPORT_CONFIG.copy()
 
@@ -234,6 +252,7 @@ def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"): #Safe Default Dir to
     print(f"[+] Ran Loki on directory {sdirectoryToScan}")                                                                   #Return to old working directory
     return None
 
+#Pulls in the dllconfig and loads it to the global variables
 print(f"[+] Attempting to Load dll suspicious Configuration from {dllConfigPath}")
 IMPORT_CONFIG = load_import_config(dllConfigPath)
 NOISY_GUI_DLLS = set(IMPORT_CONFIG["noisy_gui_dlls"])
@@ -242,9 +261,55 @@ SUSPICIOUS_APIS = set(IMPORT_CONFIG["suspicious_apis"])
 SUSPICIOUS_KEYWORDS = list(IMPORT_CONFIG["suspicious_keywords"])
 MAX_FUNCS_PER_DLL = int(IMPORT_CONFIG["max_funcs_per_dll"])
 
+def welcome():
+    print(logo)
+    print("Enter the full Directory path to Scan")
+    print("Enter for Default Sample folder")
+    user_input = input()
+    if user_input:
+        global directoryToScan
+        directoryToScan = str(user_input)
+        print(f"Using Directory: {directoryToScan}")
+    else:
+        print(f"Using Default Directory: {directoryToScan}")
+
+def print_triage_results(json_path: str = "triage_result.json") -> None:
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Optional: print the overall summary at the top
+    overall_summary = data.get("summary")
+    if overall_summary:
+        print("=== Overall Summary ===")
+        print(overall_summary)
+        print()
+
+    files = data.get("files", [])
+    if not files:
+        print("No file entries found in triage result.")
+        return
+
+    print("=== File Triage ===")
+    for entry in files:
+        path = entry.get("path", "")
+        filename = os.path.basename(path) if path else "<unknown>"
+
+        priority = (entry.get("priority") or "unknown").upper()
+        risk_score = entry.get("risk_score")
+        comment = (entry.get("comment") or "").strip()
+
+        # Basic line with name + rating
+        if risk_score is not None:
+            rating_str = f"{priority} ({risk_score})"
+        else:
+            rating_str = priority
+
+        print(f"\n{filename}")
+        print(f"  Rating : {rating_str}")
+        print(f"  Summary: {comment}")
 
 if __name__ == "__main__":
-
+    welcome()
     workingDirectory = os.path.dirname(os.path.abspath(__file__)) #Find where this script is running from
     changeDir(workingDirectory) 
     clearOldLogs(logDir)                                          #Clear existing Output Logs
@@ -284,6 +349,6 @@ if __name__ == "__main__":
         print(f"[+] GPT Response not Recieved")
     else:
         print(f"[+] GPT Response Recieved")
-
+    print_triage_results("triage_result.json")
     print ("Enter any key to exit")
     input()
