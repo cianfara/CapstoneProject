@@ -43,6 +43,33 @@ logo = r"""
 """
 
 
+def load_import_config(path="import_config.json"):
+    cfg = DEFAULT_IMPORT_CONFIG.copy()
+    workingDirectory = os.path.dirname(os.path.abspath(__file__)) #Since we don't know the absolute path to 
+    os.chdir(workingDirectory)                                    #Import_config.json, we switch the os path to the current directory
+    try:                                                          #It's assumed it's in the same dir as the script 
+        with open(path, "r") as f:
+            file_cfg = json.load(f)
+        # Only override known keys
+        for key, value in file_cfg.items():
+            if key in cfg:
+                cfg[key] = value
+    except Exception as e:
+        print(f"[!] Failed to load {path}: {e}")
+        print("[!] Using built-in defaults for import config.")
+
+    return cfg
+
+
+#Pulls in the dllconfig and loads it to the global variables
+print(f"[+] Attempting to Load dll suspicious Configuration from {dllConfigPath}")
+IMPORT_CONFIG = load_import_config(dllConfigPath)
+NOISY_GUI_DLLS = set(IMPORT_CONFIG["noisy_gui_dlls"])
+INTERESTING_DLLS = set(IMPORT_CONFIG["interesting_dlls"])
+SUSPICIOUS_APIS = set(IMPORT_CONFIG["suspicious_apis"])
+SUSPICIOUS_KEYWORDS = list(IMPORT_CONFIG["suspicious_keywords"])
+MAX_FUNCS_PER_DLL = int(IMPORT_CONFIG["max_funcs_per_dll"])
+
 def summarize_imports(path):
     pe = pefile.PE(path)
 
@@ -91,8 +118,10 @@ def summarize_imports(path):
         if sampled:
             sample_imports[dll] = sorted(set(sampled))
 
+
         # Check for suspicious APIs
         for f in funcs:
+            
             base_name = f.split("@", 1)[0]  # strip stdcall decorations if any
             if base_name in SUSPICIOUS_APIS:
                 suspicious_apis.add(f"{dll}!{base_name}")
@@ -101,6 +130,7 @@ def summarize_imports(path):
             lower_name = base_name.lower()
             if any(keyword in lower_name for keyword in SUSPICIOUS_KEYWORDS):
                 suspicious_apis.add(f"{dll}!{base_name}")
+        
 
     return {
         "num_imports": total_imports,
@@ -194,22 +224,7 @@ def clearOldLogs(file_to_delete):
 
 
 
-def load_import_config(path="import_config.json"):
-    cfg = DEFAULT_IMPORT_CONFIG.copy()
 
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                file_cfg = json.load(f)
-            # Only override known keys
-            for key, value in file_cfg.items():
-                if key in cfg:
-                    cfg[key] = value
-        except Exception as e:
-            print(f"[!] Failed to load {path}: {e}")
-            print("[!] Using built-in defaults for import config.")
-
-    return cfg
 
 
 
@@ -252,14 +267,7 @@ def runLoki(sdirectoryToScan=r"C:\\", sWorkingDir=r"C:\\"): #Safe Default Dir to
     print(f"[+] Ran Loki on directory {sdirectoryToScan}")                                                                   #Return to old working directory
     return None
 
-#Pulls in the dllconfig and loads it to the global variables
-print(f"[+] Attempting to Load dll suspicious Configuration from {dllConfigPath}")
-IMPORT_CONFIG = load_import_config(dllConfigPath)
-NOISY_GUI_DLLS = set(IMPORT_CONFIG["noisy_gui_dlls"])
-INTERESTING_DLLS = set(IMPORT_CONFIG["interesting_dlls"])
-SUSPICIOUS_APIS = set(IMPORT_CONFIG["suspicious_apis"])
-SUSPICIOUS_KEYWORDS = list(IMPORT_CONFIG["suspicious_keywords"])
-MAX_FUNCS_PER_DLL = int(IMPORT_CONFIG["max_funcs_per_dll"])
+
 
 def welcome():
     print(logo)

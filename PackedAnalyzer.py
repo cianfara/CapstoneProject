@@ -53,8 +53,8 @@ def analyze_pe(path):
         "suspicious_section_names": [],
         "entry_point_section": None,
         "num_imports": 0,
-        "imports_by_dll": {},
-        "suspicious_apis": [],
+        "imports_by_dll": {},  #Used only for Calculations, Removed before return
+        "suspicious_apis": [], #Used only for Calculations, Removed before Return
         "overlay_size": 0,
         "relocations_stripped": False,
         "entropy_mean": None,
@@ -177,7 +177,14 @@ def analyze_pe(path):
     else:
         verdict = "unlikely_packed"
 
-    result["packed_verdict"] = verdict
+    result.pop("suspicious_apis")           #This data using customised filters for detecting packed stubs 
+    result.pop("imports_by_dll")            #The info for GPT is added in the main scanner
+    result.pop("num_imports")               #This will be steamlined in the future
+ 
+    result["packed_verdict"] = verdict      
+                                            
+
+
 
     pe.close()
     return result
