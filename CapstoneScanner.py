@@ -8,12 +8,12 @@ from GPTAnalysis import sendLogsToGPT
 import re
 import subprocess
 
-directoryToScan =   r"C:\Users\Adam\Desktop\Dev\sample"       #Update to change the scanning target
+directoryToScan =   r"C:\Users\Adam\Desktop\Dev\sample"       #Default if not specified
 logDir = r"summary.json"                                      #Update to change the name of the Output File
-dllConfigPath = "import_config.json"                          #Update to change what DLLs are considered suspicious or benign. 
+dllConfigPath = "import_config.json"                          #Filename of config. Used to change what DLLs are considered suspicious or benign. 
                                                               #This is used to summarize and reduce bloat in the summary.json file
                                                               #You can also specify the max number of functions per DLL
-
+                                                              #Edit the config directly or omit of required. Empty Default will be used.
 
 DEFAULT_IMPORT_CONFIG = {                                     #Do not modify, only used in the case where DLL config is not found
     "noisy_gui_dlls": [],
@@ -272,6 +272,16 @@ def welcome():
         print(f"Using Directory: {directoryToScan}")
     else:
         print(f"Using Default Directory: {directoryToScan}")
+        
+    print("Send Results to ChatGPT For Analysis? (y/n)")
+    user_input = input()
+    if user_input.upper() == "Y" or user_input.upper() == "YES":
+        print(f"Output will be sent to ChatGPT?")
+        bSendGPT = True
+    else:
+        print(f"Output will NOT be sent to ChatGPT")
+        bSendGPT = False
+    return bSendGPT #Return bool flag to enable or disable send to GPT
 
 def print_triage_results(json_path: str = "triage_result.json") -> None:
     with open(json_path, "r", encoding="utf-8") as f:
@@ -309,7 +319,7 @@ def print_triage_results(json_path: str = "triage_result.json") -> None:
         print(f"  Summary: {comment}")
 
 if __name__ == "__main__":
-    welcome()
+    bSendToGPT = welcome()
     workingDirectory = os.path.dirname(os.path.abspath(__file__)) #Find where this script is running from
     changeDir(workingDirectory) 
     clearOldLogs(logDir)                                          #Clear existing Output Logs
@@ -341,14 +351,15 @@ if __name__ == "__main__":
         json.dump(results, f, indent=2)
 
     print(f"[+] Saved analysis to {logDir}")
-    print(f"[+] Sending Logs to GPT")
-    print("Hold")
-    input()
-    GPTResult = sendLogsToGPT()
-    if GPTResult==None:
-        print(f"[+] GPT Response not Recieved")
+    if bSendToGPT:
+        print(f"[+] Sending Logs to GPT")
+        GPTResult = sendLogsToGPT()
+        if GPTResult==None:
+            print(f"[+] GPT Response not Recieved")
+        else:
+            print(f"[+] GPT Response Recieved")
+        print_triage_results("triage_result.json")
     else:
-        print(f"[+] GPT Response Recieved")
-    print_triage_results("triage_result.json")
+        print(f"[+] Logs not sent to ChatGPT")
     print ("Enter any key to exit")
     input()
