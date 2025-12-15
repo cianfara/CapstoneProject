@@ -7,18 +7,15 @@ from pathlib import Path
 
 import pefile
 
-SUSPICIOUS_SECTION_NAMES = {
-    "UPX0", "UPX1", "UPX2",
-    ".aspack", ".petite", ".themida",
-    ".packed", ".upx"
-}
 
-# APIs commonly used in unpacking / injection stubs
-SUSPICIOUS_APIS = {
-    "virtualalloc", "virtualallocex", "virtualprotect",
-    "loadlibrarya", "loadlibraryw", "getprocaddress",
-    "writeprocessmemory", "createremotethread",
-    "mapviewoffile", "ntunmapviewofsection"
+DEFAULT_IMPORT_CONFIG = {                                     #Do not modify, only used in the case where config is not found
+    "noisy_gui_dlls": [],
+    "interesting_dlls": [],
+    "suspicious_apis": [],
+    "suspicious_keywords": [],
+    "known_packer_section_names": [],
+    "suspicious_section_names": [],
+    "max_funcs_per_dll": 20,
 }
 
 IMAGE_SCN_MEM_EXECUTE = 0x20000000
@@ -36,10 +33,12 @@ def get_ep_section(pe):
             return name
     return None
 
-def doNothing():
-    pass
 
-def analyze_pe(path):
+def analyze_pe(path, IMPORT_CONFIG):
+
+    KNOWN_PACKER_SECTION_NAMES = set(IMPORT_CONFIG["known_packer_section_names"]) #Load configs into local dicts 
+    SUSPICIOUS_SECTION_NAMES = set(IMPORT_CONFIG["suspicious_section_names"])
+    SUSPICIOUS_APIS = set(IMPORT_CONFIG["suspicious_apis"])
     pe = pefile.PE(path, fast_load=False)
     filesize = os.path.getsize(path)
 
@@ -50,6 +49,7 @@ def analyze_pe(path):
         "packed_score": 0,
         "sections": [],
         "high_entropy_sections": [],
+        "known_packer_section_names": [],
         "suspicious_section_names": [],
         "entry_point_section": None,
         "num_imports": 0,
@@ -64,8 +64,8 @@ def analyze_pe(path):
     # ---- Sections / entropy ----
     entropies = []
     high_entropy_sections = []
+    known_packer_section_names = [] #Not global config, local list to add to results. Global is all upercase KNOWN_PACKER_SECTION_NAMES
     suspicious_section_names = []
-
     for s in pe.sections:
         name = s.Name.rstrip(b"\x00").decode(errors="ignore") or "<unnamed>"
         entropy = s.get_entropy()
@@ -87,11 +87,14 @@ def analyze_pe(path):
                 # Executable high-entropy section is a big hint
                 result["packed_score"] += 15 if is_executable else 8
 
+        if name in KNOWN_PACKER_SECTION_NAMES:
+            known_packer_section_names.append(name)
         if name in SUSPICIOUS_SECTION_NAMES:
             suspicious_section_names.append(name)
             result["packed_score"] += 20
 
     result["high_entropy_sections"] = high_entropy_sections
+    result["known_packer_section_names"] = known_packer_section_names
     result["suspicious_section_names"] = suspicious_section_names
 
     if entropies:

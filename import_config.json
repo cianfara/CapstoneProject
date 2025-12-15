@@ -1,4 +1,20 @@
 {
+  "known_packer_section_names": [
+	"UPX0",
+	"UPX1",
+	"UPX2",
+    ".aspack",
+	".petite",
+	".themida",
+	".upx"
+  ],
+  "suspicious_section_names": [
+	".packed",        
+    ".stub", 
+	".pdatax",
+    ".boom", 
+	".xyz"
+  ],
   "noisy_gui_dlls": [
     "user32.dll",
     "gdi32.dll",

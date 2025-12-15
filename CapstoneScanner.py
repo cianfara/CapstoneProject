@@ -20,6 +20,8 @@ DEFAULT_IMPORT_CONFIG = {                                     #Do not modify, on
     "interesting_dlls": [],
     "suspicious_apis": [],
     "suspicious_keywords": [],
+    "known_packer_section_names": [],
+    "suspicious_section_names": [],
     "max_funcs_per_dll": 20,
 }
     
@@ -57,18 +59,19 @@ def load_import_config(path="import_config.json"):
     except Exception as e:
         print(f"[!] Failed to load {path}: {e}")
         print("[!] Using built-in defaults for import config.")
-
     return cfg
 
 
 #Pulls in the dllconfig and loads it to the global variables
-print(f"[+] Attempting to Load dll suspicious Configuration from {dllConfigPath}")
+print(f"[+] Attempting to Load Configuration from {dllConfigPath}")
 IMPORT_CONFIG = load_import_config(dllConfigPath)
 NOISY_GUI_DLLS = set(IMPORT_CONFIG["noisy_gui_dlls"])
 INTERESTING_DLLS = set(IMPORT_CONFIG["interesting_dlls"])
 SUSPICIOUS_APIS = set(IMPORT_CONFIG["suspicious_apis"])
 SUSPICIOUS_KEYWORDS = list(IMPORT_CONFIG["suspicious_keywords"])
 MAX_FUNCS_PER_DLL = int(IMPORT_CONFIG["max_funcs_per_dll"])
+KNOWN_PACKER_SECTION_NAMES = set(IMPORT_CONFIG["known_packer_section_names"])
+SUSPICIOUS_SECTION_NAMES = set(IMPORT_CONFIG["suspicious_section_names"])
 
 def summarize_imports(path):
     pe = pefile.PE(path)
@@ -371,7 +374,7 @@ if __name__ == "__main__":
         clean = os.path.normpath(binaryToAnalyze)
         print(f"[+] Analyzing {clean}")
         importsResult = summarize_imports(binaryToAnalyze)
-        packedresult = analyze_pe(binaryToAnalyze)
+        packedresult = analyze_pe(binaryToAnalyze, IMPORT_CONFIG) #dllConfigPath is by default "import_config.json"
         loki_info = loki_results.get(binaryToAnalyze, {})
         # Build a combined object per file
         results.append({
