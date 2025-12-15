@@ -8,7 +8,7 @@ from GPTAnalysis import sendLogsToGPT
 import re
 import subprocess
 
-directoryToScan =   r"C:\Users\Adam\Desktop\Dev\sample"       #Default if not specified
+directoryToScan =   r"C:\Users\%UserName%\Desktop\Dev\sample"       #Default if not specified
 logDir = r"summary.json"                                      #Update to change the name of the Output File
 dllConfigPath = "import_config.json"                          #Filename of config. Used to change what DLLs are considered suspicious or benign. 
                                                               #This is used to summarize and reduce bloat in the summary.json file
