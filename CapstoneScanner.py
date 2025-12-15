@@ -15,7 +15,7 @@ dllConfigPath = "import_config.json"                          #Filename of confi
                                                               #You can also specify the max number of functions per DLL
                                                               #Edit the config directly or omit of required. Empty Default will be used.
 
-DEFAULT_IMPORT_CONFIG = {                                     #Do not modify, only used in the case where DLL config is not found
+DEFAULT_IMPORT_CONFIG = {                                     #Do not modify, only used in the case where config is not found
     "noisy_gui_dlls": [],
     "interesting_dlls": [],
     "suspicious_apis": [],
@@ -283,13 +283,22 @@ def welcome():
         
     print("Send Results to ChatGPT For Analysis? (y/n)")
     user_input = input()
+
     if user_input.upper() == "Y" or user_input.upper() == "YES":
-        print(f"Output will be sent to ChatGPT?")
-        bSendGPT = True
+        print(f"Output will be sent to ChatGPT")
+        bSendToGPT = True
     else:
         print(f"Output will NOT be sent to ChatGPT")
-        bSendGPT = False
-    return bSendGPT #Return bool flag to enable or disable send to GPT
+        bSendToGPT = False
+    print("Use existing Loki Logs? (y/n)")
+    user_input = input()
+    if user_input.upper() == "Y" or user_input.upper() == "YES":
+        bSkipLoki = True
+    else:
+        print(f"Running Loki")
+        bSkipLoki = False
+    bOpts = [bSendToGPT,bSkipLoki]
+    return bOpts #Return bool flag to enable or disable send to GPT
 
 def print_triage_results(json_path: str = "triage_result.json") -> None:
     with open(json_path, "r", encoding="utf-8") as f:
@@ -332,9 +341,28 @@ if __name__ == "__main__":
     changeDir(workingDirectory) 
     clearOldLogs(logDir)                                          #Clear existing Output Logs
 
-    runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory)                            
-    loki_results = parse_loki_results("lokiOut.txt")
 
+    if bSendToGPT[1]: #If "bSkipLoki" set to True we will not run Loki
+        bRetryOnError = True
+        while(bRetryOnError):
+            try:
+                print("Enter name of Loki Logfile (E.G lokiOut.txt)")
+                print("Enter nothing for Default")
+                lokiLogPath = input()
+                if lokiLogPath == "":
+                    lokiLogPath = r"lokiOut.txt" #Default File Name
+                    print(f"[!] No name specified, using default {lokiLogPath}")
+                print("[!] Skipping Loki, using existing Logs")
+                with open(lokiLogPath) as checkExists: #Throw error if path does not exist before moving on
+                    pass
+                bRetryOnError = False 
+            except FileNotFoundError:
+                print("[!] Filename not found!!!")
+                bRetryOnError = True #Error happened, re-run the Loop     
+    else:
+        runLoki(sdirectoryToScan=directoryToScan, sWorkingDir=workingDirectory) #Skip not set to True
+        lokiLogPath = r"lokiOut.txt"                      
+    loki_results = parse_loki_results(lokiLogPath)
     # Files to analyze come from Loki hits
     listofBinaries = list(loki_results.keys())                     #Returns a list of Binaries detected by Loki by running Regex on the Output log
     results = []
@@ -359,7 +387,7 @@ if __name__ == "__main__":
         json.dump(results, f, indent=2)
 
     print(f"[+] Saved analysis to {logDir}")
-    if bSendToGPT:
+    if bSendToGPT[0]:
         print(f"[+] Sending Logs to GPT")
         GPTResult = sendLogsToGPT()
         if GPTResult==None:
