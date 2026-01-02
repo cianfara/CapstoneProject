@@ -8,7 +8,7 @@ from GPTAnalysis import sendLogsToGPT
 import re
 import subprocess
 
-directoryToScan =   r"C:\Users\%UserName%\Desktop\Dev\sample"       #Default if not specified
+directoryToScan =  str(os.path.dirname(os.path.abspath(__file__))) + "\sample" #Default is just the directory of this file + sample
 logDir = r"summary.json"                                      #Update to change the name of the Output File
 dllConfigPath = "import_config.json"                          #Filename of config. Used to change what DLLs are considered suspicious or benign. 
                                                               #This is used to summarize and reduce bloat in the summary.json file
@@ -293,13 +293,13 @@ def welcome():
     else:
         print(f"Output will NOT be sent to ChatGPT")
         bSendToGPT = False
-    print("Use existing Loki Logs? (y/n)")
+    print("Run Loki? (y/n)")
     user_input = input()
     if user_input.upper() == "Y" or user_input.upper() == "YES":
-        bSkipLoki = True
-    else:
         print(f"Running Loki")
         bSkipLoki = False
+    else:
+        bSkipLoki = True
     bOpts = [bSendToGPT,bSkipLoki]
     return bOpts #Return bool flag to enable or disable send to GPT
 
@@ -337,8 +337,19 @@ def print_triage_results(json_path: str = "triage_result.json") -> None:
         print(f"\n{filename}")
         print(f"  Rating : {rating_str}")
         print(f"  Summary: {comment}")
+# subprocess.run(["loki.exe", "-p", sdirectoryToScan, "-l", "lokiOut.txt"], shell=True)
+# subprocess.run("powershell cp lokiOut.txt ..", shell=True)
+def checkAuthentiCodeSig(filePath):
+    listOfAuthenticodeStatus = ["NotSigned", "Valid", "UnknownError", "HashMismatch", "NotTrusted", "NotSupportedFileFormat", "Incompatible"]
+    output = str(subprocess.run(["powershell", "Get-AuthenticodeSignature", "-LiteralPath", filePath], encoding='utf-8', stdout=subprocess.PIPE))
+    matchedStatus = "Error"
+    for sStatus in listOfAuthenticodeStatus:
+        if sStatus in output:
+            matchedStatus = sStatus
+    return matchedStatus
 
 if __name__ == "__main__":
+
     bSendToGPT = welcome()
     workingDirectory = os.path.dirname(os.path.abspath(__file__)) #Find where this script is running from
     changeDir(workingDirectory) 
@@ -369,6 +380,7 @@ if __name__ == "__main__":
     # Files to analyze come from Loki hits
     listofBinaries = list(loki_results.keys())                     #Returns a list of Binaries detected by Loki by running Regex on the Output log
     results = []
+    
 
     for binaryToAnalyze in listofBinaries:
         clean = os.path.normpath(binaryToAnalyze)
@@ -376,12 +388,14 @@ if __name__ == "__main__":
         importsResult = summarize_imports(binaryToAnalyze)
         packedresult = analyze_pe(binaryToAnalyze, IMPORT_CONFIG) #dllConfigPath is by default "import_config.json"
         loki_info = loki_results.get(binaryToAnalyze, {})
+        authauthenticodeSig = checkAuthentiCodeSig(binaryToAnalyze)
         # Build a combined object per file
         results.append({
             "path": clean,
             "loki": loki_info,          # <-- Loki score, hashes, rule, matched strings
             "imports": importsResult,   # existing pefile summary
             "packing": packedresult,    # your PackedAnalyzer output
+            "authenticode signature": authauthenticodeSig,
             # ToDo: capstone, strings, etc. can hang off here later
         })
 
@@ -399,6 +413,6 @@ if __name__ == "__main__":
             print(f"[+] GPT Response Recieved")
         print_triage_results("triage_result.json")
     else:
-        print(f"[+] Logs not sent to ChatGPT")
+        print(f"[!] Logs not sent to ChatGPT")
     print ("Enter any key to exit")
     input()
